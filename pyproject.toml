@@ -1,0 +1,49 @@
+[project]
+name = "regbot"
+version = "0.1.0"
+description = "Automated SAS EuroBonus account registration via curl_cffi + CapSolver"
+readme = "README.md"
+requires-python = ">=3.12"
+dependencies = [
+    "curl-cffi>=0.7.0",
+    "requests>=2.32.5",
+]
+
+[project.optional-dependencies]
+browser = [
+    "playwright>=1.49.0",
+]
+dev = [
+    "pytest>=9.0.1",
+    "ruff>=0.14.6",
+]
+
+[project.scripts]
+regbot = "regbot.cli:main"
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatchling.build.targets.wheel]
+packages = ["src/regbot"]
+
+[tool.ruff]
+line-length = 120
+target-version = "py312"
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I", "N", "UP", "B", "A", "C4", "SIM"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+markers = [
+    "live: opt-in live tests (proxy / email / SAS)",
+    "live_browser: opt-in Playwright + CapSolver extension tests",
+]
+
+[dependency-groups]
+dev = [
+    "pytest>=9.0.1",
+    "ruff>=0.14.6",
+]
