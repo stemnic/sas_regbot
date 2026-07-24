@@ -25,7 +25,7 @@ class Inbox:
 class EmailProvider(Protocol):
     """Create disposable inboxes and wait for SAS OTP emails (direct HTTP)."""
 
-    def create_inbox(self) -> Inbox: ...
+    def create_inbox(self, *, prefix: str | None = None) -> Inbox: ...
 
     def wait_for_otp(
         self,
@@ -44,12 +44,14 @@ class EmailProviderError(RuntimeError):
 class ManualEmailProvider:
     """Semi-automated: ask for email, then after requestOtp ask for OTP on stdin."""
 
-    def create_inbox(self) -> Inbox:
+    def create_inbox(self, *, prefix: str | None = None) -> Inbox:
         print(
             "\n=== Registration email ===\n"
             "Enter the mailbox that can receive the SAS verification code.\n",
             flush=True,
         )
+        if prefix:
+            print(f"(suggested local-part prefix: {prefix})", flush=True)
         address = input("Email address: ").strip()
         if not address or "@" not in address:
             raise EmailProviderError("Invalid email address")
@@ -83,7 +85,7 @@ class FakeEmailProvider:
         self.address = address
         self.otp = otp
 
-    def create_inbox(self) -> Inbox:
+    def create_inbox(self, *, prefix: str | None = None) -> Inbox:
         return Inbox(address=self.address)
 
     def wait_for_otp(
@@ -115,7 +117,7 @@ class FixedEmailProvider:
         self.address = address
         self.otp = otp.strip() if otp else None
 
-    def create_inbox(self) -> Inbox:
+    def create_inbox(self, *, prefix: str | None = None) -> Inbox:
         return Inbox(address=self.address, meta={"provider": "fixed"})
 
     def wait_for_otp(
@@ -171,12 +173,14 @@ class HttpEmailProvider:
             headers["X-API-Key"] = self.api_key
         return headers
 
-    def create_inbox(self) -> Inbox:
+    def create_inbox(self, *, prefix: str | None = None) -> Inbox:
         import requests
 
         payload: dict[str, Any] = {}
         if self.domain:
             payload["domain"] = self.domain
+        if prefix:
+            payload["prefix"] = prefix
         response = requests.post(
             f"{self.api_base}/inboxes",
             json=payload or None,
@@ -257,7 +261,11 @@ def get_email_provider(
     if fixed_email:
         return FixedEmailProvider(fixed_email, otp=fixed_otp)
 
-    provider = (name or config.EMAIL_PROVIDER or "anymessage").strip().lower()
+    provider = (name or config.EMAIL_PROVIDER or "openinbox").strip().lower()
+    if provider in {"openinbox", "open-inbox", "open_inbox", "oi"}:
+        from .openinbox import OpenInboxProvider
+
+        return OpenInboxProvider.from_config()
     if provider in {"anymessage", "any-message", "any_message"}:
         from .anymessage import AnyMessageProvider
 
@@ -275,5 +283,6 @@ def get_email_provider(
             domain=config.EMAIL_DOMAIN,
         )
     raise EmailProviderError(
-        f"Unknown EMAIL_PROVIDER={provider!r}. Use anymessage|manual|fake|http."
+        f"Unknown EMAIL_PROVIDER={provider!r}. "
+        "Use openinbox|anymessage|manual|fake|http."
     )

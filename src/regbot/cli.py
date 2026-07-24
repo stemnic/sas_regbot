@@ -201,7 +201,7 @@ def build_parser() -> argparse.ArgumentParser:
     p_stock.add_argument(
         "--email-provider",
         default=None,
-        help="Override EMAIL_PROVIDER (default anymessage)",
+        help="Override EMAIL_PROVIDER (default openinbox)",
     )
     p_stock.set_defaults(func=cmd_email_stock)
 
@@ -211,9 +211,10 @@ def build_parser() -> argparse.ArgumentParser:
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
 examples:
-  # Fully automated (AnyMessage orders email + reads OTP)
-  export ANYMESSAGE_TOKEN=...
-  uv run regbot register --debug -v
+  # Fully automated (OpenInbox creates email + reads OTP; Oxylabs ports rotate)
+  export OPENINBOX_API_KEY=...
+  unset OXYLABS_PORT   # rotate 8001-8005
+  xvfb-run -a uv run regbot register --count 2 --debug -v
 
   # Manual: bot requests OTP to YOUR email, then ASKS you to type the code
   uv run regbot register --email you@gmx.com --debug -v
@@ -228,8 +229,8 @@ examples:
     --debug -v
 
 notes:
-  Disconnect personal VPNs (e.g. Mullvad) — Bright Data returns 407/ip_forbidden.
-  HTML warm of www.flysas.com is skipped by default (Cloudflare); api2 is used instead.
+  Default captcha is Playwright + page enroll (Layer C). Use xvfb-run without a display.
+  Oxylabs ports rotate by default; pin with OXYLABS_PORT=8001 for debug.
 """,
     )
     _add_verbose(p_reg)
@@ -243,7 +244,7 @@ notes:
     p_reg.add_argument(
         "--email-provider",
         default=None,
-        help="Override EMAIL_PROVIDER (anymessage|manual|fake|http)",
+        help="Override EMAIL_PROVIDER (openinbox|anymessage|manual|fake|http)",
     )
     p_reg.add_argument(
         "--email",

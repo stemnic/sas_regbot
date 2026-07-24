@@ -14,7 +14,7 @@ from .captcha import CaptchaSolution, CapsolverError, solve_captcha
 from .captcha.browser import BrowserCaptchaError, BrowserEnrollResult, playwright_solve_and_enroll
 from .email.base import EmailProvider, EmailProviderError, Inbox
 from .fingerprint import impersonate_for_user_agent
-from .profile import UsProfile, generate_us_profile, validate_email
+from .profile import UsProfile, email_local_prefix, generate_us_profile, validate_email
 from .proxy import StickyProxy, new_sticky_proxy
 from .store import RegisteredAccount, save_account
 from .transport import BlockedError, ProxiedSession, SasHttpError, TransportError
@@ -389,8 +389,23 @@ def register_once(
                 if profile is None:
                     profile = generate_us_profile(email=email)
             else:
-                report.mark("email_create")
-                inbox = email_provider.create_inbox()
+                # Generate identity first so OpenInbox can use name as email prefix
+                if profile is None:
+                    profile = generate_us_profile()
+                report.mark(
+                    "profile",
+                    first_name=profile.first_name,
+                    last_name=profile.last_name,
+                    gender=profile.gender,
+                    dob=profile.date_of_birth,
+                )
+                prefix = email_local_prefix(profile.first_name, profile.last_name)
+                report.mark("email_create", prefix=prefix)
+                try:
+                    inbox = email_provider.create_inbox(prefix=prefix)
+                except TypeError:
+                    # Older providers without prefix kwarg
+                    inbox = email_provider.create_inbox()  # type: ignore[call-arg]
                 if not validate_email(inbox.address):
                     raise RegistrationError(
                         f"Email fails SAS client regex: {inbox.address}",
@@ -398,16 +413,7 @@ def register_once(
                     )
                 email = inbox.address
                 report.email = email
-                report.mark("email_ready", email=email)
-                if profile is None:
-                    profile = generate_us_profile(email=email)
-                    report.mark(
-                        "profile",
-                        first_name=profile.first_name,
-                        last_name=profile.last_name,
-                        gender=profile.gender,
-                        dob=profile.date_of_birth,
-                    )
+                report.mark("email_ready", email=email, prefix=prefix)
 
                 if skip_request_otp:
                     report.mark("request_otp_skipped")

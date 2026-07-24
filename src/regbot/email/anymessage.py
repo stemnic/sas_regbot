@@ -122,7 +122,7 @@ class AnyMessageProvider:
         data = self._get("/email/quantity", {"site": self.site})
         return data
 
-    def create_inbox(self) -> Inbox:
+    def create_inbox(self, *, prefix: str | None = None) -> Inbox:
         params: dict[str, str] = {"site": self.site}
         if self.domain:
             params["domain"] = self.domain

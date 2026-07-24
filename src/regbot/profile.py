@@ -10,6 +10,10 @@ import string
 from dataclasses import dataclass
 from datetime import date
 
+from .names_data import FIRST_FEMALE as _FIRST_F
+from .names_data import FIRST_MALE as _FIRST_M
+from .names_data import LAST_NAMES as _LAST
+
 # Client-side rules extracted from flysas register JS (HAR).
 EMAIL_RE = re.compile(
     r"^[_a-zA-Z0-9!#$%&'*=?^_`{|}~-]+"
@@ -29,68 +33,9 @@ PASSWORD_RE = re.compile(
 NAME_RE = re.compile(r"^[-.A-Za-z\s'_\d]{2,30}$")
 OTP_RE = re.compile(r"^\d{6}$")
 
-_FIRST_M = (
-    "James", "Robert", "John", "Michael", "David", "William", "Richard", "Joseph",
-    "Thomas", "Charles", "Christopher", "Daniel", "Matthew", "Anthony", "Mark", "Donald",
-    "Steven", "Paul", "Andrew", "Joshua", "Kenneth", "Kevin", "Brian", "George",
-    "Timothy", "Ronald", "Edward", "Jason", "Jeffrey", "Ryan", "Jacob", "Gary",
-    "Nicholas", "Eric", "Jonathan", "Stephen", "Larry", "Justin", "Scott", "Brandon",
-    "Benjamin", "Samuel", "Raymond", "Gregory", "Frank", "Alexander", "Patrick", "Jack",
-    "Dennis", "Jerry", "Tyler", "Aaron", "Jose", "Adam", "Nathan", "Henry",
-    "Douglas", "Zachary", "Peter", "Kyle", "Noah", "Ethan", "Jeremy", "Walter",
-    "Christian", "Keith", "Roger", "Terry", "Austin", "Sean", "Gerald", "Carl",
-    "Dylan", "Harold", "Jesse", "Bryan", "Billy", "Bruce", "Gabriel", "Joe",
-    "Logan", "Alan", "Juan", "Wayne", "Roy", "Ralph", "Randy", "Eugene",
-    "Vincent", "Russell", "Louis", "Philip", "Bobby", "Johnny", "Bradley", "Harry",
-    "Arthur", "Albert", "Lawrence", "Roger", "Howard", "Eugene", "Carlos", "Russell",
-)
-
-_FIRST_F = (
-    "Mary", "Patricia", "Jennifer", "Linda", "Elizabeth", "Barbara", "Susan", "Jessica",
-    "Sarah", "Karen", "Lisa", "Nancy", "Betty", "Margaret", "Sandra", "Ashley",
-    "Kimberly", "Emily", "Donna", "Michelle", "Dorothy", "Carol", "Amanda", "Melissa",
-    "Deborah", "Stephanie", "Rebecca", "Sharon", "Laura", "Cynthia", "Kathleen", "Amy",
-    "Angela", "Shirley", "Anna", "Brenda", "Pamela", "Emma", "Nicole", "Helen",
-    "Samantha", "Katherine", "Christine", "Debra", "Rachel", "Carolyn", "Janet", "Catherine",
-    "Maria", "Heather", "Diane", "Ruth", "Julie", "Olivia", "Joyce", "Virginia",
-    "Victoria", "Kelly", "Lauren", "Christina", "Joan", "Evelyn", "Judith", "Megan",
-    "Andrea", "Cheryl", "Hannah", "Jacqueline", "Martha", "Gloria", "Teresa", "Ann",
-    "Sara", "Madison", "Frances", "Kathryn", "Janice", "Jean", "Abigail", "Alice",
-    "Judy", "Sophia", "Grace", "Denise", "Amber", "Doris", "Marilyn", "Danielle",
-    "Beverly", "Isabella", "Theresa", "Diana", "Natalie", "Brittany", "Charlotte", "Marie",
-)
-
 _FIRST = _FIRST_M + _FIRST_F
 _MALE_SET = {n.lower() for n in _FIRST_M}
 _FEMALE_SET = {n.lower() for n in _FIRST_F}
-
-_LAST = (
-    "Smith", "Johnson", "Williams", "Brown", "Jones", "Garcia", "Miller", "Davis",
-    "Rodriguez", "Martinez", "Hernandez", "Lopez", "Gonzalez", "Wilson", "Anderson", "Thomas",
-    "Taylor", "Moore", "Jackson", "Martin", "Lee", "Perez", "Thompson", "White",
-    "Harris", "Sanchez", "Clark", "Ramirez", "Lewis", "Robinson", "Walker", "Young",
-    "Allen", "King", "Wright", "Scott", "Torres", "Nguyen", "Hill", "Flores",
-    "Green", "Adams", "Nelson", "Baker", "Hall", "Rivera", "Campbell", "Mitchell",
-    "Carter", "Roberts", "Gomez", "Phillips", "Evans", "Turner", "Diaz", "Parker",
-    "Cruz", "Edwards", "Collins", "Reyes", "Stewart", "Morris", "Morales", "Murphy",
-    "Cook", "Rogers", "Gutierrez", "Ortiz", "Morgan", "Cooper", "Peterson", "Bailey",
-    "Reed", "Kelly", "Howard", "Ramos", "Kim", "Cox", "Ward", "Richardson",
-    "Watson", "Brooks", "Chavez", "Wood", "James", "Bennett", "Gray", "Mendoza",
-    "Ruiz", "Hughes", "Price", "Alvarez", "Castillo", "Sanders", "Patel", "Myers",
-    "Long", "Ross", "Foster", "Jimenez", "Powell", "Jenkins", "Perry", "Russell",
-    "Sullivan", "Bell", "Coleman", "Butler", "Henderson", "Barnes", "Gonzales", "Fisher",
-    "Vasquez", "Simmons", "Romero", "Jordan", "Patterson", "Alexander", "Hamilton", "Graham",
-    "Reynolds", "Griffin", "Wallace", "Moreno", "West", "Cole", "Hayes", "Bryant",
-    "Herrera", "Gibson", "Ellis", "Tran", "Medina", "Aguilar", "Stevens", "Murray",
-    "Ford", "Castro", "Marshall", "Owens", "Harrison", "Fernandez", "McDonald", "Woods",
-    "Washington", "Kennedy", "Wells", "Vargas", "Henry", "Chen", "Freeman", "Webb",
-    "Tucker", "Guzman", "Burns", "Crawford", "Olson", "Simpson", "Porter", "Hunter",
-    "Gordon", "Mendez", "Silva", "Shaw", "Snyder", "Mason", "Dixon", "Munoz",
-    "Hunt", "Hicks", "Holmes", "Palmer", "Wagner", "Black", "Robertson", "Boyd",
-    "Rose", "Stone", "Salazar", "Fox", "Warren", "Mills", "Meyer", "Rice",
-    "Schmidt", "Garza", "Daniels", "Ferguson", "Nichols", "Stephens", "Soto", "Weaver",
-    "Ryan", "Gardner", "Payne", "Grant", "Dunn", "Kelley", "Spencer", "Hawkins",
-)
 
 # Common US area codes (non-premium looking)
 _AREA_CODES = (
@@ -270,6 +215,32 @@ def generate_dob(
         day = min(day, calendar.monthrange(year, month)[1])
         candidate = date(year, month, day)
     return candidate.isoformat()
+
+
+def email_local_prefix(
+    first_name: str,
+    last_name: str,
+    *,
+    with_digits: bool = False,
+    rng: random.Random | None = None,
+) -> str:
+    """Build OpenInbox-style local-part prefix from names: ``first.last`` (no digits by default).
+
+    OpenInbox ``prefix`` request: ``{"prefix": "john.smith"}`` → john.smith@domain.
+    Digits only when ``with_digits=True`` (e.g. after a name collision retry).
+    """
+    first = re.sub(r"[^a-zA-Z]", "", (first_name or "").lower())
+    last = re.sub(r"[^a-zA-Z]", "", (last_name or "").lower())
+    if not first:
+        first = "user"
+    if not last:
+        last = "person"
+    # Keep local-part reasonable for SAS email regex
+    base = f"{first}.{last}"[:40].strip(".")
+    if with_digits:
+        r = rng or random
+        base = f"{base}{r.randint(1, 9999)}"
+    return base
 
 
 def generate_us_profile(

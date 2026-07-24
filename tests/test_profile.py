@@ -2,11 +2,14 @@
 
 from __future__ import annotations
 
+import re
 from datetime import date
 
+from regbot.names_data import FIRST_FEMALE, FIRST_MALE, LAST_NAMES
 from regbot.profile import (
     EMAIL_RE,
     PASSWORD_RE,
+    email_local_prefix,
     generate_dob,
     generate_password,
     generate_us_profile,
@@ -63,3 +66,17 @@ def test_email_regex_accepts_har_style() -> None:
     # SAS local-part class does not include '+'
     assert not validate_email("user+tag@example.com")
     assert not validate_email("not-an-email")
+
+
+def test_name_pools_are_large() -> None:
+    assert len(FIRST_MALE) >= 150
+    assert len(FIRST_FEMALE) >= 150
+    assert len(LAST_NAMES) >= 500
+
+
+def test_email_local_prefix_from_names() -> None:
+    p = email_local_prefix("John", "Smith")
+    assert p == "john.smith"
+    p2 = email_local_prefix("Mary", "OBrien", with_digits=True, rng=__import__("random").Random(0))
+    assert p2.startswith("mary.obrien")
+    assert re.search(r"\d+$", p2)

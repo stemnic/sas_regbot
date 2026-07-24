@@ -2,19 +2,34 @@
 
 from __future__ import annotations
 
-import itertools
+import json
+import logging
+import os
 import random
 import re
 import string
 import threading
 from dataclasses import dataclass
+from pathlib import Path
 from urllib.parse import quote
 
 from . import config
 
+logger = logging.getLogger(__name__)
+
 _SESSION_PATTERN = re.compile(r"-session-[A-Za-z0-9]+")
-_oxy_port_cycle: itertools.cycle[str] | None = None
 _oxy_lock = threading.Lock()
+
+
+def reset_oxylabs_port_cycle() -> None:
+    """Clear persisted rotation state (tests)."""
+    path = _state_path()
+    with _oxy_lock:
+        try:
+            if path.is_file():
+                path.unlink()
+        except OSError:
+            pass
 
 
 class ProxyError(RuntimeError):
@@ -43,18 +58,103 @@ def _oxylabs_username(raw: str) -> str:
     return f"user-{name}"
 
 
+def _state_path() -> Path:
+    raw = getattr(config, "REGBOT_PROXY_STATE_PATH", "data/oxy_port_state.json")
+    return Path(raw or "data/oxy_port_state.json")
+
+
+def _load_state() -> dict:
+    path = _state_path()
+    try:
+        if path.is_file():
+            data = json.loads(path.read_text(encoding="utf-8"))
+            if isinstance(data, dict):
+                return data
+    except (OSError, json.JSONDecodeError) as error:
+        logger.debug("proxy state load failed: %s", error)
+    return {}
+
+
+def _save_state(state: dict) -> None:
+    path = _state_path()
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        tmp = path.with_suffix(path.suffix + ".tmp")
+        tmp.write_text(json.dumps(state, indent=2), encoding="utf-8")
+        os.replace(tmp, path)
+    except OSError as error:
+        logger.warning("proxy state save failed: %s", error)
+
+
 def _next_oxylabs_port() -> str:
-    global _oxy_port_cycle
+    """Pick next Oxylabs DC port — sticky within one attempt, rotated across CLI runs.
+
+    State is persisted to disk so each ``uv run regbot`` continues the cycle instead
+    of always landing on the same port (in-memory rotation is useless for --count 1).
+
+    - ``roundrobin`` (default): walk a shuffled pool, cursor saved on disk.
+    - ``random``: pick uniformly among ports other than last-used.
+    """
     ports = config.oxylabs_ports()
+    if not ports:
+        return "8001"
     if len(ports) == 1:
         return ports[0]
+
+    mode = (getattr(config, "REGBOT_PROXY_ROTATE", "roundrobin") or "roundrobin").strip().lower()
+    pool = [str(p) for p in ports]
+
     with _oxy_lock:
-        if _oxy_port_cycle is None:
-            # shuffle once so parallel-ish runs don't all start on 8001
-            shuffled = list(ports)
-            random.shuffle(shuffled)
-            _oxy_port_cycle = itertools.cycle(shuffled)
-        return next(_oxy_port_cycle)
+        state = _load_state()
+        last = str(state.get("last_port") or "")
+
+        if mode in {"random", "shuffle", "rand", "rnd"}:
+            candidates = [p for p in pool if p != last] or list(pool)
+            port = random.choice(candidates)
+            state = {"last_port": port, "mode": "random", "pool": pool}
+            _save_state(state)
+            logger.info(
+                "Oxylabs port pick=%s last=%s mode=random pool=%s",
+                port,
+                last or "-",
+                pool,
+            )
+            return port
+
+        # roundrobin with persisted shuffled order
+        order = state.get("order")
+        if not isinstance(order, list) or sorted(str(x) for x in order) != sorted(pool):
+            order = list(pool)
+            random.shuffle(order)
+            cursor = 0
+        else:
+            order = [str(x) for x in order]
+            try:
+                cursor = int(state.get("cursor") or 0)
+            except (TypeError, ValueError):
+                cursor = 0
+            if cursor < 0:
+                cursor = 0
+
+        port = order[cursor % len(order)]
+        next_cursor = (cursor + 1) % len(order)
+        state = {
+            "last_port": port,
+            "cursor": next_cursor,
+            "order": order,
+            "mode": "roundrobin",
+            "pool": pool,
+        }
+        _save_state(state)
+        logger.info(
+            "Oxylabs port pick=%s last=%s mode=roundrobin cursor=%s→%s order=%s",
+            port,
+            last or "-",
+            cursor,
+            next_cursor,
+            order,
+        )
+        return port
 
 
 @dataclass(frozen=True)
@@ -109,13 +209,20 @@ def new_sticky_proxy(session_id: str | None = None) -> StickyProxy:
     if provider in {"oxylabs", "oxy", "dc.oxylabs"}:
         port = session_id if session_id and session_id.isdigit() else _next_oxylabs_port()
         host_base = config.PROXY_HOST.split(":")[0] if config.PROXY_HOST else "dc.oxylabs.io"
-        return StickyProxy(
+        proxy = StickyProxy(
             session_id=f"p{port}",
             host=f"{host_base}:{port}",
             username=_oxylabs_username(config.PROXY_USERNAME),
             password=config.PROXY_PASSWORD,
             provider="oxylabs",
         )
+        logger.info(
+            "Oxylabs sticky lease %s (rotate=%s pool=%s)",
+            proxy.label,
+            getattr(config, "REGBOT_PROXY_ROTATE", "roundrobin"),
+            config.oxylabs_ports(),
+        )
+        return proxy
 
     # Bright Data (legacy)
     actual = session_id or _random_session_id()

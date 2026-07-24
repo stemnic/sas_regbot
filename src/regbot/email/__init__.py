@@ -8,6 +8,7 @@ from .base import (
     Inbox,
     get_email_provider,
 )
+from .openinbox import OpenInboxProvider
 
 __all__ = [
     "AnyMessageProvider",
@@ -15,5 +16,6 @@ __all__ = [
     "EmailProviderError",
     "FixedEmailProvider",
     "Inbox",
+    "OpenInboxProvider",
     "get_email_provider",
 ]

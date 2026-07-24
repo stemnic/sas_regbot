@@ -41,9 +41,14 @@ PROXY_HOST = os.environ.get("PROXY_HOST", "") or os.environ.get(
     "dc.oxylabs.io" if PROXY_PROVIDER.startswith("oxy") else "brd.superproxy.io:33335",
 )
 OXYLABS_PORTS = os.environ.get("OXYLABS_PORTS", "8001,8002,8003,8004,8005")
-# Default pin 8001 (manual success path). Set OXYLABS_PORT= empty to rotate OXYLABS_PORTS.
-_oxy_port_env = os.environ.get("OXYLABS_PORT")
-OXYLABS_PORT = "8001" if _oxy_port_env is None else _oxy_port_env.strip()
+# Optional pin for debug (e.g. OXYLABS_PORT=8001). Empty = rotate across OXYLABS_PORTS.
+OXYLABS_PORT = os.environ.get("OXYLABS_PORT", "").strip()
+# roundrobin (default, persisted across CLI runs) | random (avoid last-used)
+REGBOT_PROXY_ROTATE = os.environ.get("REGBOT_PROXY_ROTATE", "roundrobin").strip().lower()
+# Cross-process port rotation state (so each uv run does not restart at 8001)
+REGBOT_PROXY_STATE_PATH = os.environ.get(
+    "REGBOT_PROXY_STATE_PATH", "data/oxy_port_state.json"
+)
 
 
 def oxylabs_ports() -> list[str]:
@@ -55,13 +60,20 @@ def oxylabs_ports() -> list[str]:
 # CapSolver
 CAPSOLVER_API_KEY = os.environ.get("CAPSOLVER_API_KEY", "")
 
-# Email provider (OTP path is direct — not proxied)
-EMAIL_PROVIDER = os.environ.get("EMAIL_PROVIDER", "anymessage").strip().lower()
+# Email provider (OTP path is direct — not proxied). Default: OpenInbox.
+EMAIL_PROVIDER = os.environ.get("EMAIL_PROVIDER", "openinbox").strip().lower()
 EMAIL_API_KEY = os.environ.get("EMAIL_API_KEY", "")
 EMAIL_API_BASE = os.environ.get("EMAIL_API_BASE", "").rstrip("/")
 EMAIL_DOMAIN = os.environ.get("EMAIL_DOMAIN", "")
 
-# AnyMessage (https://anymessage.shop/en/docs) — preferred OTP source
+# OpenInbox (https://openinbox.io/api-docs) — preferred automatic OTP source
+OPENINBOX_API_KEY = os.environ.get("OPENINBOX_API_KEY", "") or EMAIL_API_KEY
+OPENINBOX_BASE_URL = os.environ.get(
+    "OPENINBOX_BASE_URL", "https://api.openinbox.io/api"
+).rstrip("/")
+OPENINBOX_DOMAIN = os.environ.get("OPENINBOX_DOMAIN", EMAIL_DOMAIN)
+
+# AnyMessage (https://anymessage.shop/en/docs) — optional fallback
 ANYMESSAGE_TOKEN = os.environ.get("ANYMESSAGE_TOKEN", "") or EMAIL_API_KEY
 ANYMESSAGE_SITE = os.environ.get("ANYMESSAGE_SITE", "flysas.com")
 ANYMESSAGE_DOMAIN = os.environ.get("ANYMESSAGE_DOMAIN", EMAIL_DOMAIN)
