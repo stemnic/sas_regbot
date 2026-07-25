@@ -160,3 +160,142 @@ def test_factory_openinbox(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr("regbot.config.EMAIL_API_KEY", "")
     provider = get_email_provider("openinbox")
     assert isinstance(provider, OpenInboxProvider)
+
+
+def test_looks_like_inbox_limit() -> None:
+    from regbot.email.openinbox import looks_like_inbox_limit
+
+    assert looks_like_inbox_limit(
+        'Inbox limit reached. Your 7-Day Pass plan allows 10 concurrent inboxes.'
+    )
+    assert looks_like_inbox_limit("OpenInbox inbox limit (403): concurrent")
+    assert not looks_like_inbox_limit("OpenInbox auth failed (403): invalid key")
+
+
+def test_403_limit_not_auth_wording() -> None:
+    provider = OpenInboxProvider(api_key="tmp_test_key")
+    resp = MagicMock()
+    resp.status_code = 403
+    resp.content = b'{"message":"Inbox limit reached. 10 concurrent inboxes."}'
+    resp.text = resp.content.decode()
+    resp.json.return_value = {"message": "Inbox limit reached. 10 concurrent inboxes."}
+    session = MagicMock()
+    session.request.return_value = resp
+    provider._session = session
+
+    with pytest.raises(EmailProviderError, match="inbox limit") as ei:
+        provider._request("POST", "/v1/inboxes", json_body={})
+    assert "auth failed" not in str(ei.value).lower()
+
+
+def test_401_still_auth() -> None:
+    provider = OpenInboxProvider(api_key="tmp_test_key")
+    resp = MagicMock()
+    resp.status_code = 401
+    resp.content = b'{"message":"Unauthorized"}'
+    resp.text = "Unauthorized"
+    session = MagicMock()
+    session.request.return_value = resp
+    provider._session = session
+
+    with pytest.raises(EmailProviderError, match="auth failed"):
+        provider._request("GET", "/v1/inboxes")
+
+
+def test_create_inbox_frees_one_oldest_on_limit(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """At capacity: delete exactly one oldest inbox, then create succeeds."""
+    monkeypatch.setattr("regbot.email.openinbox.config.REGBOT_OPENINBOX_PRUNE_OLDEST", True)
+    provider = OpenInboxProvider(api_key="tmp_test_key")
+
+    limit_body = (
+        '{"statusCode":403,"message":"Inbox limit reached. Your 7-Day Pass plan '
+        'allows 10 concurrent inboxes. Please delete an existing inbox."}'
+    )
+    limit_resp = MagicMock()
+    limit_resp.status_code = 403
+    limit_resp.content = limit_body.encode()
+    limit_resp.text = limit_body
+    limit_resp.json.return_value = {
+        "statusCode": 403,
+        "message": "Inbox limit reached. Your 7-Day Pass plan allows 10 concurrent inboxes.",
+    }
+
+    list_resp = MagicMock()
+    list_resp.status_code = 200
+    list_payload = {
+        "success": True,
+        "data": [
+            {
+                "id": "new-1",
+                "email": "new@x.com",
+                "createdAt": "2026-07-25T10:00:00.000Z",
+            },
+            {
+                "id": "old-1",
+                "email": "old@x.com",
+                "createdAt": "2026-07-24T07:00:00.000Z",
+            },
+            {
+                "id": "mid-1",
+                "email": "mid@x.com",
+                "createdAt": "2026-07-24T16:00:00.000Z",
+            },
+        ],
+    }
+    list_resp.content = b"{}"
+    list_resp.text = "{}"
+    list_resp.json.return_value = list_payload
+
+    del_resp = MagicMock()
+    del_resp.status_code = 204
+    del_resp.content = b""
+    del_resp.text = ""
+
+    ok_resp = MagicMock()
+    ok_resp.status_code = 200
+    ok_resp.content = b'{"success":true,"data":{"id":"fresh","email":"fresh@x.com"}}'
+    ok_resp.text = ok_resp.content.decode()
+    ok_resp.json.return_value = {
+        "success": True,
+        "data": {"id": "fresh", "email": "fresh@x.com"},
+    }
+
+    session = MagicMock()
+    # 1) POST create → limit
+    # 2) GET list
+    # 3) DELETE oldest
+    # 4) POST create → ok
+    session.request.side_effect = [limit_resp, list_resp, del_resp, ok_resp]
+    provider._session = session
+
+    inbox = provider.create_inbox(prefix="jane.doe")
+    assert inbox.address == "fresh@x.com"
+    assert inbox.external_id == "fresh"
+    assert inbox.meta.get("pruned_oldest") is True
+
+    methods = [c.args[0] for c in session.request.call_args_list]
+    paths = [c.args[1] for c in session.request.call_args_list]
+    assert methods == ["POST", "GET", "DELETE", "POST"]
+    assert paths[2].endswith("/v1/inboxes/old-1")
+    assert methods.count("DELETE") == 1
+
+
+def test_create_inbox_limit_without_prune(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr("regbot.email.openinbox.config.REGBOT_OPENINBOX_PRUNE_OLDEST", False)
+    provider = OpenInboxProvider(api_key="tmp_test_key")
+    limit_body = '{"message":"Inbox limit reached. 10 concurrent inboxes."}'
+    limit_resp = MagicMock()
+    limit_resp.status_code = 403
+    limit_resp.content = limit_body.encode()
+    limit_resp.text = limit_body
+    session = MagicMock()
+    session.request.return_value = limit_resp
+    provider._session = session
+
+    with pytest.raises(EmailProviderError, match="inbox limit"):
+        provider.create_inbox()
+    assert session.request.call_count == 1

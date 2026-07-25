@@ -160,6 +160,11 @@ OPENINBOX_BASE_URL = os.environ.get(
     "OPENINBOX_BASE_URL", "https://api.openinbox.io/api"
 ).rstrip("/")
 OPENINBOX_DOMAIN = os.environ.get("OPENINBOX_DOMAIN", EMAIL_DOMAIN)
+# On concurrent-inbox limit: delete only the oldest inbox once, then retry create.
+# Keep other inboxes for late/misdelivered mail after account creation.
+REGBOT_OPENINBOX_PRUNE_OLDEST = os.environ.get(
+    "REGBOT_OPENINBOX_PRUNE_OLDEST", "true"
+).lower() in {"1", "true", "yes"}
 
 # AnyMessage (https://anymessage.shop/en/docs) — optional fallback
 ANYMESSAGE_TOKEN = os.environ.get("ANYMESSAGE_TOKEN", "") or EMAIL_API_KEY

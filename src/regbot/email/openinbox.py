@@ -37,6 +37,20 @@ def _strip_html(text: str) -> str:
     return unescape(re.sub(r"\s+", " ", plain)).strip()
 
 
+def looks_like_inbox_limit(message: str) -> bool:
+    """True when OpenInbox rejected create due to concurrent inbox capacity."""
+    low = (message or "").lower()
+    if "inbox limit" in low or "concurrent inbox" in low:
+        return True
+    if "limit reached" in low and "inbox" in low:
+        return True
+    if "concurrent" in low and "inbox" in low:
+        return True
+    if "max active" in low and "inbox" in low:
+        return True
+    return False
+
+
 def extract_otp(blob: str, pattern: re.Pattern[str] | None = None) -> str | None:
     """Pull a 6-digit OTP from HTML or plain text."""
     otp_re = pattern or DEFAULT_OTP_PATTERN
@@ -151,15 +165,25 @@ class OpenInboxProvider:
             )
         except requests.RequestException as error:
             raise EmailProviderError(f"OpenInbox request failed: {error}") from error
-        if response.status_code in {401, 403}:
+        body_snip = (response.text or "")[:500]
+        if response.status_code == 401:
             raise EmailProviderError(
-                f"OpenInbox auth failed ({response.status_code}): check OPENINBOX_API_KEY "
-                f"and that the plan includes API access. {response.text[:300]}"
+                f"OpenInbox auth failed (401): check OPENINBOX_API_KEY "
+                f"and that the plan includes API access. {body_snip[:300]}"
+            )
+        if response.status_code == 403:
+            if looks_like_inbox_limit(body_snip):
+                raise EmailProviderError(
+                    f"OpenInbox inbox limit (403): {body_snip[:300]}"
+                )
+            raise EmailProviderError(
+                f"OpenInbox auth failed (403): check OPENINBOX_API_KEY "
+                f"and that the plan includes API access. {body_snip[:300]}"
             )
         if response.status_code >= 400:
             raise EmailProviderError(
                 f"OpenInbox {method.upper()} {path} → {response.status_code}: "
-                f"{response.text[:500]}"
+                f"{body_snip}"
             )
         if not response.content or response.status_code == 204:
             return {}
@@ -177,17 +201,72 @@ class OpenInboxProvider:
             )
         return data
 
+    def list_inboxes(self) -> list[dict[str, Any]]:
+        """Return all account inboxes (``GET /v1/inboxes``)."""
+        raw = self._request("GET", "/v1/inboxes")
+        data = _unwrap_data(raw)
+        if isinstance(data, list):
+            return [row for row in data if isinstance(row, dict)]
+        if isinstance(data, dict):
+            for key in ("inboxes", "items", "data"):
+                val = data.get(key)
+                if isinstance(val, list):
+                    return [row for row in val if isinstance(row, dict)]
+        return []
+
+    def delete_inbox(self, inbox_id: str) -> None:
+        """Delete one inbox by id (``DELETE /v1/inboxes/:id``)."""
+        iid = (inbox_id or "").strip()
+        if not iid:
+            raise EmailProviderError("OpenInbox delete_inbox requires inbox id")
+        self._request("DELETE", f"/v1/inboxes/{iid}")
+        logger.info("OpenInbox deleted inbox id=%s", iid)
+
+    def free_one_oldest_inbox(self) -> dict[str, Any] | None:
+        """Delete exactly the oldest inbox so one create slot opens.
+
+        Keeps newer inboxes for late/misdelivered mail after account creation.
+        Returns the deleted row, or None if nothing to delete.
+        """
+        rows = self.list_inboxes()
+        if not rows:
+            logger.info("OpenInbox free_one_oldest: no inboxes to delete")
+            return None
+
+        def _created_key(row: dict[str, Any]) -> str:
+            return str(row.get("createdAt") or row.get("created_at") or "")
+
+        ordered = sorted(rows, key=_created_key)
+        oldest = ordered[0]
+        inbox_id = str(oldest.get("id") or oldest.get("inboxId") or oldest.get("inbox_id") or "")
+        email = str(oldest.get("email") or oldest.get("address") or "")
+        if not inbox_id:
+            raise EmailProviderError(f"OpenInbox oldest inbox missing id: {oldest}")
+        logger.info(
+            "OpenInbox pruning oldest inbox id=%s email=%s created=%s (count_was=%s)",
+            inbox_id,
+            email,
+            _created_key(oldest) or "?",
+            len(rows),
+        )
+        self.delete_inbox(inbox_id)
+        return oldest
+
     def create_inbox(self, *, prefix: str | None = None) -> Inbox:
         """Create account-owned inbox via authenticated v1 API.
 
         ``prefix`` is sent as OpenInbox ``prefix`` (e.g. ``john.smith`` →
         ``john.smith@…``). On conflict, retries with a numeric suffix.
+
+        On concurrent-inbox limit: free **one oldest** inbox (if enabled) and
+        retry the same create once — never bulk-delete; never delete after enroll.
         """
         import random as _random
 
         base_prefix = (prefix or "").strip().lower()
         base_prefix = re.sub(r"[^a-z0-9._-]", "", base_prefix).strip("._-")
         last_error: Exception | None = None
+        pruned_once = False
         for attempt in range(5):
             payload: dict[str, Any] = {}
             if self.domain:
@@ -203,12 +282,59 @@ class OpenInboxProvider:
                 raw = self._request("POST", "/v1/inboxes", json_body=payload or {})
             except EmailProviderError as error:
                 last_error = error
-                msg = str(error).lower()
-                if "limit" in msg or "403" in msg:
+                if looks_like_inbox_limit(str(error)):
+                    prune_on = bool(
+                        getattr(config, "REGBOT_OPENINBOX_PRUNE_OLDEST", True)
+                    )
+                    if prune_on and not pruned_once:
+                        try:
+                            freed = self.free_one_oldest_inbox()
+                        except EmailProviderError as prune_err:
+                            raise EmailProviderError(
+                                f"OpenInbox inbox limit and failed to free oldest: {prune_err}"
+                            ) from prune_err
+                        pruned_once = True
+                        if freed is None:
+                            raise EmailProviderError(
+                                "OpenInbox inbox limit: no existing inbox to free. "
+                                "Upgrade plan or wait for natural expiry."
+                            ) from error
+                        logger.info(
+                            "OpenInbox retrying create after freeing oldest (prefix=%s)",
+                            payload.get("prefix") or "",
+                        )
+                        try:
+                            raw = self._request(
+                                "POST", "/v1/inboxes", json_body=payload or {}
+                            )
+                        except EmailProviderError as error2:
+                            last_error = error2
+                            if looks_like_inbox_limit(str(error2)):
+                                raise EmailProviderError(
+                                    "OpenInbox inbox limit: freed one oldest inbox and "
+                                    "still at capacity. Upgrade plan or wait for natural "
+                                    f"inbox expiry. ({error2})"
+                                ) from error2
+                            # Non-limit failure after prune (e.g. name taken)
+                            logger.info(
+                                "OpenInbox create after prune failed (retry name): %s",
+                                error2,
+                            )
+                            continue
+                    else:
+                        raise EmailProviderError(
+                            "OpenInbox inbox limit: concurrent inbox capacity full "
+                            f"(prune_oldest={'off' if not prune_on else 'already tried'}). "
+                            f"{error}"
+                        ) from error
+                elif "auth failed" in str(error).lower():
                     raise
-                # name taken / validation — retry with digits only as fallback
-                logger.info("OpenInbox create retry attempt=%s: %s", attempt + 1, error)
-                continue
+                else:
+                    # name taken / validation — retry with digits only as fallback
+                    logger.info(
+                        "OpenInbox create retry attempt=%s: %s", attempt + 1, error
+                    )
+                    continue
             data = _unwrap_data(raw)
             if not isinstance(data, dict):
                 last_error = EmailProviderError(f"OpenInbox create_inbox unexpected: {raw}")
@@ -222,15 +348,21 @@ class OpenInboxProvider:
                 last_error = EmailProviderError(f"OpenInbox create_inbox missing id: {raw}")
                 continue
             logger.info(
-                "OpenInbox inbox ready email=%s id=%s prefix=%s",
+                "OpenInbox inbox ready email=%s id=%s prefix=%s pruned_oldest=%s",
                 address,
                 inbox_id,
                 payload.get("prefix") or "",
+                pruned_once,
             )
             return Inbox(
                 address=str(address),
                 external_id=str(inbox_id),
-                meta={"provider": "openinbox", "raw": data, "prefix": payload.get("prefix")},
+                meta={
+                    "provider": "openinbox",
+                    "raw": data,
+                    "prefix": payload.get("prefix"),
+                    "pruned_oldest": pruned_once,
+                },
             )
         raise EmailProviderError(
             f"OpenInbox create_inbox failed after retries: {last_error}"
