@@ -48,14 +48,35 @@ def _session_username(base_username: str, session_id: str) -> str:
     return f"{base_username}{replacement}"
 
 
-def _oxylabs_username(raw: str) -> str:
-    """Oxylabs DC expects user-USERNAME (idempotent if already prefixed)."""
+def _oxylabs_username(raw: str, *, country: str | None = None) -> str:
+    """Build Oxylabs DC username: ``user-USERNAME`` + optional ``-country-XX``.
+
+    Country selection:
+    https://developers.oxylabs.io/products/proxies/datacenter-proxies/select-country
+    e.g. ``user-scraper2-country-US`` for United States.
+    """
     name = raw.strip()
     if not name:
         return name
+    # Strip existing user- / country- so we can re-apply cleanly
     if name.startswith("user-"):
-        return name
-    return f"user-{name}"
+        name = name[5:]
+    # Drop any prior country-* segments at the end (or mid)
+    name = re.sub(r"-country-[A-Za-z]{2}\b", "", name, flags=re.I)
+    name = name.strip("-")
+    user = f"user-{name}" if name else "user-"
+
+    cc = (country if country is not None else getattr(config, "OXYLABS_COUNTRY", "") or "").strip()
+    if not cc:
+        return user
+    # Accept "US" or "country-US"
+    if cc.lower().startswith("country-"):
+        cc = cc.split("-", 1)[-1]
+    cc = cc.upper()
+    if len(cc) != 2 or not cc.isalpha():
+        logger.warning("Ignoring invalid OXYLABS_COUNTRY=%r (need 2-letter code)", country)
+        return user
+    return f"{user}-country-{cc}"
 
 
 def _state_path() -> Path:
@@ -244,19 +265,22 @@ def new_sticky_proxy(session_id: str | None = None) -> StickyProxy:
     if provider in {"oxylabs", "oxy", "dc.oxylabs"}:
         port = session_id if session_id and session_id.isdigit() else _next_oxylabs_port()
         host_base = config.PROXY_HOST.split(":")[0] if config.PROXY_HOST else "dc.oxylabs.io"
+        country = getattr(config, "OXYLABS_COUNTRY", "US") or ""
+        username = _oxylabs_username(config.PROXY_USERNAME, country=country or None)
         proxy = StickyProxy(
             session_id=f"p{port}",
             host=f"{host_base}:{port}",
-            username=_oxylabs_username(config.PROXY_USERNAME),
+            username=username,
             password=config.PROXY_PASSWORD,
             provider="oxylabs",
         )
         lo, hi = config.oxylabs_port_range()
         logger.info(
-            "Oxylabs sticky lease %s (user=%s host=%s ppt_range=%s-%s)",
+            "Oxylabs sticky lease %s (user=%s host=%s country=%s ppt_range=%s-%s)",
             proxy.label,
-            proxy.username[:24],
+            proxy.username,
             proxy.host,
+            country or "any",
             lo,
             hi,
         )

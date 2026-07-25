@@ -40,6 +40,9 @@ PROXY_HOST = os.environ.get("PROXY_HOST", "") or os.environ.get(
     "OXYLABS_HOST",
     "dc.oxylabs.io" if PROXY_PROVIDER.startswith("oxy") else "brd.superproxy.io:33335",
 )
+# Prefer US datacenter pool (username suffix country-US). Empty = no country filter.
+# https://developers.oxylabs.io/products/proxies/datacenter-proxies/select-country
+OXYLABS_COUNTRY = os.environ.get("OXYLABS_COUNTRY", "US").strip().upper()
 # Pay-per-traffic DC: sticky session = random port in [MIN, MAX] (Oxylabs docs: 8001–63000).
 OXYLABS_PORT_MIN = int(os.environ.get("OXYLABS_PORT_MIN", "8001"))
 OXYLABS_PORT_MAX = int(os.environ.get("OXYLABS_PORT_MAX", "63000"))

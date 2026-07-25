@@ -31,8 +31,18 @@ def test_session_username_replaces_existing() -> None:
 
 
 def test_oxylabs_username_prefix() -> None:
-    assert _oxylabs_username("scraper2_3mi9y") == "user-scraper2_3mi9y"
-    assert _oxylabs_username("user-scraper2_3mi9y") == "user-scraper2_3mi9y"
+    assert _oxylabs_username("scraper2_3mi9y", country="") == "user-scraper2_3mi9y"
+    assert _oxylabs_username("user-scraper2_3mi9y", country="") == "user-scraper2_3mi9y"
+
+
+def test_oxylabs_username_country_us() -> None:
+    assert _oxylabs_username("scraper2_3mi9y", country="US") == "user-scraper2_3mi9y-country-US"
+    assert _oxylabs_username("user-scraper2_3mi9y", country="US") == "user-scraper2_3mi9y-country-US"
+    assert (
+        _oxylabs_username("user-scraper2_3mi9y-country-US", country="US")
+        == "user-scraper2_3mi9y-country-US"
+    )
+    assert _oxylabs_username("scraper2", country="country-us") == "user-scraper2-country-US"
 
 
 def test_oxylabs_sticky_port_explicit(monkeypatch: pytest.MonkeyPatch, tmp_path) -> None:
@@ -41,12 +51,14 @@ def test_oxylabs_sticky_port_explicit(monkeypatch: pytest.MonkeyPatch, tmp_path)
     monkeypatch.setattr(config, "PROXY_PASSWORD", "secret=1")
     monkeypatch.setattr(config, "PROXY_HOST", "dc.oxylabs.io")
     monkeypatch.setattr(config, "OXYLABS_PORT", "")
+    monkeypatch.setattr(config, "OXYLABS_COUNTRY", "US")
     monkeypatch.setattr(config, "REGBOT_PROXY_STATE_PATH", str(tmp_path / "state.json"))
     proxy = new_sticky_proxy("35467")
     assert proxy.provider == "oxylabs"
     assert proxy.host == "dc.oxylabs.io:35467"
-    assert proxy.username == "user-scraper2_3mi9y"
+    assert proxy.username == "user-scraper2_3mi9y-country-US"
     assert proxy.label == "oxy-35467"
+    assert "country-US" in proxy.capsolver_proxy_string()
     assert proxy.capsolver_proxy_string().startswith("http:dc.oxylabs.io:35467:user-")
     assert "%3D" in proxy.proxies()["https"] or "secret" in proxy.proxies()["https"]
 
