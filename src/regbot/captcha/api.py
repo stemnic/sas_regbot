@@ -17,6 +17,7 @@ from typing import Any, Literal
 import requests
 
 from .. import config
+from ..http_bind import get_bound_session
 from ..proxy import StickyProxy
 
 logger = logging.getLogger(__name__)
@@ -90,7 +91,7 @@ def _poll_solution(
     while time.time() < deadline:
         time.sleep(1)  # docs: results typically 1–10s
         try:
-            result_response = requests.post(
+            result_response = get_bound_session().post(
                 CAPSOLVER_GET_RESULT_URL,
                 json={"clientKey": api_key.strip(), "taskId": task_id},
                 timeout=30,
@@ -272,7 +273,9 @@ def _create_and_poll(
 ) -> CaptchaSolution:
     create_payload = {"clientKey": api_key.strip(), "task": task}
     try:
-        create_response = requests.post(CAPSOLVER_CREATE_TASK_URL, json=create_payload, timeout=30)
+        create_response = get_bound_session().post(
+            CAPSOLVER_CREATE_TASK_URL, json=create_payload, timeout=30
+        )
         create_response.raise_for_status()
         create_data = create_response.json()
     except requests.RequestException as error:

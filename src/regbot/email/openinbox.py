@@ -105,7 +105,12 @@ class OpenInboxProvider:
         self.base_url = base_url.rstrip("/")
         self.domain = domain.strip()
         self.timeout = timeout
-        self._session = session or requests.Session()
+        if session is not None:
+            self._session = session
+        else:
+            from ..http_bind import get_bound_session
+
+            self._session = get_bound_session()
 
     @classmethod
     def from_config(cls) -> OpenInboxProvider:

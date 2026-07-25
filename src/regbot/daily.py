@@ -41,6 +41,8 @@ _SYSTEMIC_MARKERS = (
     "plan allows",
     "openinbox auth",
     "forward email",
+    "mullvad",
+    "not connected",
 )
 
 
@@ -179,6 +181,14 @@ def run_daily(
 
     Space registrations across the day with cron (e.g. 5 invocations), not one burst.
     """
+    from .netguard import MullvadNotConnectedError, require_mullvad
+
+    try:
+        require_mullvad()
+    except MullvadNotConnectedError as error:
+        logger.error("Mullvad preflight failed: %s", error)
+        raise
+
     day = utc_today()
     state = load_daily_state(date=day)
     target_n = target if target is not None else config.REGBOT_DAILY_TARGET

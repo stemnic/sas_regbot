@@ -106,6 +106,13 @@ class ProxiedSession:
         self.impersonate = impersonate or config.REGBOT_IMPERSONATE
         self.timeout = timeout if timeout is not None else config.REGBOT_REQUEST_TIMEOUT_S
         self._session_factory = session_factory
+        # Bind local sockets to Mullvad WG when preflight set a bind (source of CONNECT)
+        try:
+            from .netguard import get_curl_interface
+
+            self._interface = get_curl_interface()
+        except Exception:
+            self._interface = None
         self._session = session_factory(
             impersonate=self.impersonate,
             proxies=proxy.proxies(),
@@ -166,12 +173,17 @@ class ProxiedSession:
         if headers:
             req_headers.update(headers)
 
+        req_kwargs: dict[str, Any] = {
+            "json": json_body,
+            "headers": req_headers,
+            "timeout": self.timeout,
+        }
+        if self._interface:
+            req_kwargs["interface"] = self._interface
         response = self._session.request(
             method.upper(),
             url,
-            json=json_body,
-            headers=req_headers,
-            timeout=self.timeout,
+            **req_kwargs,
         )
         status = int(response.status_code)
         text = str(response.text or "")

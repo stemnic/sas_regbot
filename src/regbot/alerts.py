@@ -13,6 +13,7 @@ from typing import Any
 import requests
 
 from . import config
+from .http_bind import get_bound_session
 
 logger = logging.getLogger(__name__)
 
@@ -42,7 +43,7 @@ def send_alert_email(
 
     url = f"{config.FORWARDEMAIL_API_BASE}/v1/emails"
     try:
-        response = requests.post(
+        response = get_bound_session().post(
             url,
             auth=(key, ""),
             data={

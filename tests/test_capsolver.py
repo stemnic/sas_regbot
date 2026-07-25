@@ -22,8 +22,14 @@ def test_requires_api_key() -> None:
         )
 
 
-@patch("regbot.captcha.api.requests.post")
-def test_solve_proxy_mode_docs_fields(mock_post: MagicMock) -> None:
+def _session_with_posts(side_effect: list) -> MagicMock:
+    sess = MagicMock()
+    sess.post.side_effect = side_effect
+    return sess
+
+
+@patch("regbot.captcha.api.get_bound_session")
+def test_solve_proxy_mode_docs_fields(mock_gs: MagicMock) -> None:
     proxy = StickyProxy(
         "p8001",
         "dc.oxylabs.io:8001",
@@ -49,7 +55,8 @@ def test_solve_proxy_mode_docs_fields(mock_post: MagicMock) -> None:
             "createTime": 123,
         },
     }
-    mock_post.side_effect = [create, ready]
+    sess = _session_with_posts([create, ready])
+    mock_gs.return_value = sess
 
     forced_ua = (
         "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
@@ -71,7 +78,7 @@ def test_solve_proxy_mode_docs_fields(mock_post: MagicMock) -> None:
     assert sol.user_agent == "Mozilla/5.0 CapSolver"
     assert sol.recaptcha_ca_e == "cookie-e"
     assert sol.cookie_header() == "recaptcha-ca-e=cookie-e"
-    payload = mock_post.call_args_list[0].kwargs["json"]
+    payload = sess.post.call_args_list[0].kwargs["json"]
     task = payload["task"]
     assert task["type"] == "ReCaptchaV2Task"
     assert task["isInvisible"] is False
@@ -80,8 +87,8 @@ def test_solve_proxy_mode_docs_fields(mock_post: MagicMock) -> None:
     assert task["userAgent"] == forced_ua
 
 
-@patch("regbot.captcha.api.requests.post")
-def test_solve_proxyless_mode(mock_post: MagicMock) -> None:
+@patch("regbot.captcha.api.get_bound_session")
+def test_solve_proxyless_mode(mock_gs: MagicMock) -> None:
     create = MagicMock()
     create.raise_for_status = MagicMock()
     create.json.return_value = {"errorId": 0, "taskId": "t2"}
@@ -92,7 +99,8 @@ def test_solve_proxyless_mode(mock_post: MagicMock) -> None:
         "status": "ready",
         "solution": {"gRecaptchaResponse": "TOKENLESS"},
     }
-    mock_post.side_effect = [create, ready]
+    sess = _session_with_posts([create, ready])
+    mock_gs.return_value = sess
 
     with patch("regbot.captcha.api.time.sleep"):
         sol = solve_recaptcha_v2(
@@ -103,13 +111,13 @@ def test_solve_proxyless_mode(mock_post: MagicMock) -> None:
             poll_timeout_s=30,
         )
     assert sol.token == "TOKENLESS"
-    payload = mock_post.call_args_list[0].kwargs["json"]
+    payload = sess.post.call_args_list[0].kwargs["json"]
     assert payload["task"]["type"] == "ReCaptchaV2TaskProxyLess"
     assert "proxy" not in payload["task"]
 
 
-@patch("regbot.captcha.api.requests.post")
-def test_solve_captcha_passes_forced_ua(mock_post: MagicMock) -> None:
+@patch("regbot.captcha.api.get_bound_session")
+def test_solve_captcha_passes_forced_ua(mock_gs: MagicMock) -> None:
     """solve_captcha default path injects REGBOT_CAPTCHA_USER_AGENT into ReCaptchaV2Task."""
     from regbot.captcha import solve_captcha
 
@@ -124,7 +132,8 @@ def test_solve_captcha_passes_forced_ua(mock_post: MagicMock) -> None:
         "status": "ready",
         "solution": {"gRecaptchaResponse": "T", "userAgent": "returned-ua"},
     }
-    mock_post.side_effect = [create, ready]
+    sess = _session_with_posts([create, ready])
+    mock_gs.return_value = sess
     forced = "Mozilla/5.0 Chrome/146.0.0.0 forced"
 
     with patch("regbot.captcha.api.time.sleep"):
@@ -135,6 +144,6 @@ def test_solve_captcha_passes_forced_ua(mock_post: MagicMock) -> None:
             user_agent=forced,
         )
     assert sol.token == "T"
-    task = mock_post.call_args_list[0].kwargs["json"]["task"]
+    task = sess.post.call_args_list[0].kwargs["json"]["task"]
     assert task["type"] == "ReCaptchaV2Task"
     assert task["userAgent"] == forced

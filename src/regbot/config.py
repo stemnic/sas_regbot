@@ -192,6 +192,16 @@ REGBOT_CAPTCHA_MODE = os.environ.get(
 # Inner captcha loops per proxy lease (playwright: 1 → total attempts ≈ PROXY_RETRIES)
 REGBOT_CAPTCHA_RETRIES = int(os.environ.get("REGBOT_CAPTCHA_RETRIES", "1"))
 
+# Mullvad: require Connected + bind host outbound sockets to WG interface (default on)
+REGBOT_REQUIRE_MULLVAD = os.environ.get("REGBOT_REQUIRE_MULLVAD", "true").lower() in {
+    "1",
+    "true",
+    "yes",
+}
+# Empty = auto-detect (wg0-mullvad preferred)
+REGBOT_BIND_INTERFACE = os.environ.get("REGBOT_BIND_INTERFACE", "wg0-mullvad").strip()
+REGBOT_MULLVAD_BIN = os.environ.get("REGBOT_MULLVAD_BIN", "mullvad").strip() or "mullvad"
+
 # Daily automation — space attempts across the day via cron (one account per run by default)
 REGBOT_DAILY_TARGET = int(os.environ.get("REGBOT_DAILY_TARGET", "5"))
 # Max accounts to attempt in a single `regbot daily` invocation (not a burst of 5)

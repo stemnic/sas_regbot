@@ -237,6 +237,12 @@ def cmd_daily(args: argparse.Namespace) -> int:
 def cmd_test_alert(_args: argparse.Namespace) -> int:
     """Send a test alert via Forward Email to REG_ALERT_TO."""
     try:
+        from .netguard import require_mullvad
+
+        require_mullvad()
+    except Exception as error:
+        logging.getLogger(__name__).warning("Mullvad preflight: %s", error)
+    try:
         payload = send_alert_email(
             subject=f"[regbot] test alert {utc_today()}",
             text=(
@@ -248,6 +254,36 @@ def cmd_test_alert(_args: argparse.Namespace) -> int:
         print(f"ERROR: {error}", file=sys.stderr)
         return 1
     print(json.dumps({"ok": True, "response": payload}, indent=2, default=str))
+    return 0
+
+
+def cmd_check_mullvad(_args: argparse.Namespace) -> int:
+    """Require Mullvad Connected and print bind interface / exit IP."""
+    from .netguard import MullvadNotConnectedError, require_mullvad
+
+    try:
+        bind = require_mullvad(probe_exit=True)
+    except MullvadNotConnectedError as error:
+        print(f"FAIL: {error}", file=sys.stderr)
+        return 2
+    except Exception as error:
+        print(f"ERROR: {error}", file=sys.stderr)
+        return 1
+    print(
+        json.dumps(
+            {
+                "ok": True,
+                "connected": bind.connected,
+                "skipped": bind.skipped,
+                "interface": bind.interface,
+                "bind_ip": bind.bind_ip,
+                "exit_ip": bind.exit_ip,
+                "probe_ok": bind.probe_ok,
+                "summary": bind.as_log(),
+            },
+            indent=2,
+        )
+    )
     return 0
 
 
@@ -422,6 +458,13 @@ examples:
     p_alert = sub.add_parser("test-alert", help="Send a test email to REG_ALERT_TO")
     _add_verbose(p_alert)
     p_alert.set_defaults(func=cmd_test_alert)
+
+    p_mullvad = sub.add_parser(
+        "check-mullvad",
+        help="Verify Mullvad is Connected and host bind (wg0-mullvad) is available",
+    )
+    _add_verbose(p_mullvad)
+    p_mullvad.set_defaults(func=cmd_check_mullvad)
 
     return parser
 

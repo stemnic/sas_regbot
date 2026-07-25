@@ -344,6 +344,11 @@ def register_once(
     if captcha_mode not in {"manual", "stdin"}:
         config.require_capsolver()
 
+    # Bind host sockets to Mullvad; refuse if not Connected (default).
+    from .netguard import require_mullvad
+
+    require_mullvad()
+
     proxy = new_sticky_proxy()
     report = AttemptReport(
         proxy_session_id=proxy.session_id,
@@ -920,11 +925,19 @@ def register_with_retries(
 def verify_proxy_egress() -> dict[str, Any]:
     """Confirm sticky proxy works and masks direct IP."""
     config.require_proxy_credentials()
-    import requests
+    from .http_bind import get_bound_session
+    from .netguard import require_mullvad
+
+    try:
+        require_mullvad()
+    except Exception as error:
+        logger.warning("Mullvad preflight for verify-proxy: %s", error)
 
     direct_ip = None
     try:
-        direct_ip = requests.get("https://api.ipify.org/?format=json", timeout=15).json().get("ip")
+        direct_ip = get_bound_session().get(
+            "https://api.ipify.org/?format=json", timeout=15
+        ).json().get("ip")
     except Exception as error:
         logger.warning("Direct ipify failed: %s", error)
 

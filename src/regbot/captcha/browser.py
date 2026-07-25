@@ -10,7 +10,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-import requests as plain_requests
+from ..http_bind import get_bound_session
 
 from .. import config
 from ..proxy import StickyProxy
@@ -93,7 +93,7 @@ def _install_direct_google_routes(context: object, *, user_agent: str) -> None:
             if req.method.upper() not in {"GET", "HEAD"}:
                 route.continue_()
                 return
-            resp = plain_requests.get(
+            resp = get_bound_session().get(
                 url,
                 timeout=45,
                 headers={"User-Agent": user_agent},

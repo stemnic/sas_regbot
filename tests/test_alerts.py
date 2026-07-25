@@ -18,12 +18,16 @@ def test_send_alert_email_success(monkeypatch: pytest.MonkeyPatch) -> None:
     resp = MagicMock()
     resp.status_code = 200
     resp.json.return_value = {"id": "abc", "status": "queued"}
-    with patch("regbot.alerts.requests.post", return_value=resp) as post:
+    sess = MagicMock()
+    sess.post.return_value = resp
+    with patch("regbot.alerts.get_bound_session", return_value=sess) as gs:
         out = send_alert_email(subject="t", text="body")
     assert out["id"] == "abc"
+    post = sess.post
     assert post.call_args.kwargs["auth"] == ("test-key", "")
     assert post.call_args.kwargs["data"]["from"] == "reg-infra@polarawards.com"
     assert post.call_args.kwargs["data"]["to"] == "reg-alerts@polarawards.com"
+    gs.assert_called()
 
 
 def test_send_alert_requires_key(monkeypatch: pytest.MonkeyPatch) -> None:

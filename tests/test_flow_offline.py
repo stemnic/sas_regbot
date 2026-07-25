@@ -57,6 +57,7 @@ def _fake_solution(token: str = "captcha-tok"):
     return CaptchaSolution(token=token, user_agent="UA-CAP", recaptcha_ca_e="cae")
 
 
+@patch("regbot.netguard.require_mullvad")
 @patch("regbot.sas_register.solve_captcha", return_value=_fake_solution())
 @patch("regbot.sas_register.ProxiedSession")
 @patch("regbot.sas_register.new_sticky_proxy")
@@ -64,6 +65,7 @@ def test_register_once_happy_path(
     mock_proxy: MagicMock,
     mock_session_cls: MagicMock,
     mock_captcha: MagicMock,
+    _mock_mullvad: MagicMock,
     tmp_path: Any,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -140,6 +142,7 @@ def test_classify_otp_already_verified() -> None:
     assert token == "jwt-abc"
 
 
+@patch("regbot.netguard.require_mullvad")
 @patch("regbot.sas_register.solve_captcha", return_value=_fake_solution())
 @patch("regbot.sas_register.ProxiedSession")
 @patch("regbot.sas_register.new_sticky_proxy")
@@ -147,6 +150,7 @@ def test_resume_skips_otp(
     mock_proxy: MagicMock,
     mock_session_cls: MagicMock,
     mock_captcha: MagicMock,
+    _mock_mullvad: MagicMock,
     tmp_path: Any,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -196,11 +200,13 @@ def test_resume_skips_otp(
     enroll_session.close.assert_called()
 
 
+@patch("regbot.netguard.require_mullvad")
 @patch("regbot.sas_register.ProxiedSession")
 @patch("regbot.sas_register.new_sticky_proxy")
 def test_invalid_email_fails_fast(
     mock_proxy: MagicMock,
     mock_session_cls: MagicMock,
+    _mock_mullvad: MagicMock,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     from regbot.proxy import StickyProxy

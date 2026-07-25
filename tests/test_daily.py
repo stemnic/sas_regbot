@@ -22,6 +22,7 @@ def test_is_systemic_error() -> None:
     assert is_systemic_error(RuntimeError("OpenInbox auth failed 401"))
     assert is_systemic_error(RuntimeError("CapSolver createTask error: insufficient balance"))
     assert is_systemic_error(RuntimeError("otpTemporaryBlocked"))
+    assert is_systemic_error(RuntimeError("Mullvad is not Connected"))
     assert not is_systemic_error(RuntimeError("Enrollment HTTP 500 1015001"))
 
 
@@ -43,7 +44,8 @@ def test_run_daily_quota_met(tmp_path, monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr("regbot.daily.config.REGBOT_DAILY_TARGET", 5)
     monkeypatch.setattr("regbot.daily.utc_today", lambda: "2026-07-25")
     save_daily_state(DailyState(date="2026-07-25", success=5, status="quota_met"))
-    result = run_daily(target=5, debug=False, email_provider=MagicMock())
+    with patch("regbot.netguard.require_mullvad"):
+        result = run_daily(target=5, debug=False, email_provider=MagicMock())
     assert result.exit_code == 0
     assert "Quota already met" in result.message
 
@@ -61,7 +63,10 @@ def test_run_daily_circuit_on_consec_fail(tmp_path, monkeypatch: pytest.MonkeyPa
     def boom(**_kwargs):
         raise RuntimeError("Enrollment HTTP 500 1015001")
 
-    with patch("regbot.daily.register_with_retries", side_effect=boom):
+    with (
+        patch("regbot.netguard.require_mullvad"),
+        patch("regbot.daily.register_with_retries", side_effect=boom),
+    ):
         result = run_daily(
             target=5,
             batch=5,
@@ -88,9 +93,12 @@ def test_run_daily_systemic_trips_immediately(
     monkeypatch.setattr("regbot.daily.config.REG_ALERT_ENABLED", False)
     monkeypatch.setattr("regbot.daily.utc_today", lambda: "2026-07-25")
 
-    with patch(
-        "regbot.daily.register_with_retries",
-        side_effect=RuntimeError("OpenInbox 401 Unauthorized invalid key"),
+    with (
+        patch("regbot.netguard.require_mullvad"),
+        patch(
+            "regbot.daily.register_with_retries",
+            side_effect=RuntimeError("OpenInbox 401 Unauthorized invalid key"),
+        ),
     ):
         result = run_daily(
             target=5,
@@ -118,7 +126,10 @@ def test_run_daily_default_batch_is_one(
     monkeypatch.setattr("regbot.daily.utc_today", lambda: "2026-07-25")
 
     acc = RegisteredAccount(email="a@b.com", password="x", eb_number="1")
-    with patch("regbot.daily.register_with_retries", return_value=acc) as reg:
+    with (
+        patch("regbot.netguard.require_mullvad"),
+        patch("regbot.daily.register_with_retries", return_value=acc) as reg,
+    ):
         result = run_daily(target=5, debug=False, email_provider=MagicMock())
     assert reg.call_count == 1
     assert result.state.success == 1

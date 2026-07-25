@@ -174,14 +174,14 @@ class HttpEmailProvider:
         return headers
 
     def create_inbox(self, *, prefix: str | None = None) -> Inbox:
-        import requests
+        from ..http_bind import get_bound_session
 
         payload: dict[str, Any] = {}
         if self.domain:
             payload["domain"] = self.domain
         if prefix:
             payload["prefix"] = prefix
-        response = requests.post(
+        response = get_bound_session().post(
             f"{self.api_base}/inboxes",
             json=payload or None,
             headers=self._headers(),
@@ -202,14 +202,14 @@ class HttpEmailProvider:
         )
 
     def _list_messages(self, inbox: Inbox) -> list[dict[str, Any]]:
-        import requests
+        from ..http_bind import get_bound_session
 
         inbox_id = inbox.external_id or inbox.address
         url = f"{self.api_base}/inboxes/{inbox_id}/messages"
         headers = self._headers()
         if inbox.token:
             headers["Authorization"] = f"Bearer {inbox.token}"
-        response = requests.get(url, headers=headers, timeout=30)
+        response = get_bound_session().get(url, headers=headers, timeout=30)
         if response.status_code >= 400:
             raise EmailProviderError(f"list_messages failed: {response.status_code} {response.text[:500]}")
         data = response.json()
