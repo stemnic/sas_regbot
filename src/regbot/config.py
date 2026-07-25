@@ -1,4 +1,4 @@
-"""Configuration loaded from environment and optional ~/.bashrc exports."""
+"""Configuration loaded from environment, project ``.env``, and optional ~/.bashrc."""
 
 from __future__ import annotations
 
@@ -6,7 +6,52 @@ import os
 import re
 from pathlib import Path
 
-_BASHRC_PREFIXES = ("PROXY_", "OXYLABS_", "CAPSOLVER_", "EMAIL_", "REGBOT_")
+_ENV_PREFIXES = (
+    "PROXY_",
+    "OXYLABS_",
+    "CAPSOLVER_",
+    "EMAIL_",
+    "REGBOT_",
+    "OPENINBOX_",
+    "ANYMESSAGE_",
+    "FORWARDEMAIL_",
+    "REG_ALERT_",
+)
+
+
+def _parse_env_assignment(line: str) -> tuple[str, str] | None:
+    """Parse KEY=VALUE or export KEY=VALUE (optional quotes)."""
+    raw = line.strip()
+    if not raw or raw.startswith("#"):
+        return None
+    if raw.startswith("export "):
+        raw = raw[7:].strip()
+    if "=" not in raw:
+        return None
+    key, _, value = raw.partition("=")
+    key = key.strip()
+    if not key or not re.match(r"^[A-Za-z_][A-Za-z0-9_]*$", key):
+        return None
+    value = value.strip()
+    if len(value) >= 2 and value[0] == value[-1] and value[0] in {'"', "'"}:
+        value = value[1:-1]
+    return key, value
+
+
+def _load_dotenv_file(path: Path) -> None:
+    """Load KEY=VALUE from a .env file into os.environ (does not override existing)."""
+    if not path.is_file():
+        return
+    try:
+        text = path.read_text(encoding="utf-8")
+    except OSError:
+        return
+    for line in text.splitlines():
+        parsed = _parse_env_assignment(line)
+        if not parsed:
+            continue
+        key, value = parsed
+        os.environ.setdefault(key, value)
 
 
 def _load_shell_exports_from_bashrc(prefixes: tuple[str, ...]) -> None:
@@ -29,7 +74,28 @@ def _load_shell_exports_from_bashrc(prefixes: tuple[str, ...]) -> None:
         os.environ.setdefault(key, value)
 
 
-_load_shell_exports_from_bashrc(_BASHRC_PREFIXES)
+def _bootstrap_env() -> None:
+    """Load project .env then bashrc exports (existing process env wins)."""
+    # Prefer package/repo root, then cwd (for `uv run` from project dir)
+    here = Path(__file__).resolve()
+    candidates = [
+        here.parents[2] / ".env",  # src/regbot/config.py → repo root
+        Path.cwd() / ".env",
+    ]
+    seen: set[Path] = set()
+    for path in candidates:
+        try:
+            resolved = path.resolve()
+        except OSError:
+            continue
+        if resolved in seen:
+            continue
+        seen.add(resolved)
+        _load_dotenv_file(resolved)
+    _load_shell_exports_from_bashrc(_ENV_PREFIXES)
+
+
+_bootstrap_env()
 
 # Proxy: oxylabs (default) or brightdata
 PROXY_PROVIDER = os.environ.get("PROXY_PROVIDER", "oxylabs").strip().lower()
@@ -112,7 +178,8 @@ REGBOT_USER_AGENT = os.environ.get(
     "REGBOT_USER_AGENT",
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:147.0) Gecko/20100101 Firefox/147.0",
 )
-REGBOT_PROXY_RETRIES = int(os.environ.get("REGBOT_PROXY_RETRIES", "8"))
+# Max new-proxy attempts per account (captcha/proxy fail). Keep low for automation.
+REGBOT_PROXY_RETRIES = int(os.environ.get("REGBOT_PROXY_RETRIES", "3"))
 REGBOT_OTP_TIMEOUT_S = float(os.environ.get("REGBOT_OTP_TIMEOUT_S", "180"))
 REGBOT_OTP_POLL_S = float(os.environ.get("REGBOT_OTP_POLL_S", "3"))
 REGBOT_CAPTCHA_TIMEOUT_S = int(os.environ.get("REGBOT_CAPTCHA_TIMEOUT_S", "120"))
@@ -122,7 +189,38 @@ _default_captcha_mode = "playwright" if PROXY_PROVIDER.startswith("oxy") else "p
 REGBOT_CAPTCHA_MODE = os.environ.get(
     "REGBOT_CAPTCHA_MODE", _default_captcha_mode
 ).strip().lower()
-REGBOT_CAPTCHA_RETRIES = int(os.environ.get("REGBOT_CAPTCHA_RETRIES", "3"))
+# Inner captcha loops per proxy lease (playwright: 1 → total attempts ≈ PROXY_RETRIES)
+REGBOT_CAPTCHA_RETRIES = int(os.environ.get("REGBOT_CAPTCHA_RETRIES", "1"))
+
+# Daily automation — space attempts across the day via cron (one account per run by default)
+REGBOT_DAILY_TARGET = int(os.environ.get("REGBOT_DAILY_TARGET", "5"))
+# Max accounts to attempt in a single `regbot daily` invocation (not a burst of 5)
+REGBOT_DAILY_BATCH = int(os.environ.get("REGBOT_DAILY_BATCH", "1"))
+# Only used if batch > 1 (prefer cron spacing over in-process delay)
+REGBOT_ACCOUNT_DELAY_S = float(os.environ.get("REGBOT_ACCOUNT_DELAY_S", "900"))
+REGBOT_CIRCUIT_CONSEC_FAIL = int(os.environ.get("REGBOT_CIRCUIT_CONSEC_FAIL", "3"))
+REGBOT_DAILY_STATE_PATH = os.environ.get("REGBOT_DAILY_STATE_PATH", "data/daily_state.json")
+REGBOT_FORCE_CONTINUE = os.environ.get("REGBOT_FORCE_CONTINUE", "false").lower() in {
+    "1",
+    "true",
+    "yes",
+}
+
+# Forward Email alerts (circuit open / awaiting review)
+# https://forwardemail.net/en/email-api — POST /v1/emails
+FORWARDEMAIL_API_KEY = os.environ.get("FORWARDEMAIL_API_KEY", "") or os.environ.get(
+    "REG_ALERT_API_KEY", ""
+)
+FORWARDEMAIL_API_BASE = os.environ.get(
+    "FORWARDEMAIL_API_BASE", "https://api.forwardemail.net"
+).rstrip("/")
+REG_ALERT_FROM = os.environ.get("REG_ALERT_FROM", "reg-infra@polarawards.com")
+REG_ALERT_TO = os.environ.get("REG_ALERT_TO", "reg-alerts@polarawards.com")
+REG_ALERT_ENABLED = os.environ.get("REG_ALERT_ENABLED", "true").lower() in {
+    "1",
+    "true",
+    "yes",
+}
 # CapSolver v2: set true to request recaptcha-ca-* session cookies in solution
 REGBOT_CAPTCHA_IS_SESSION = os.environ.get("REGBOT_CAPTCHA_IS_SESSION", "false").lower() in {
     "1",

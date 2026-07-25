@@ -9,6 +9,8 @@ import sys
 import time
 
 from . import config
+from .alerts import AlertError, send_alert_email
+from .daily import clear_circuit, load_daily_state, run_daily, utc_today
 from .email.base import get_email_provider
 from .profile import build_us_profile
 from .sas_register import ProxyLeakError, register_with_retries, verify_proxy_egress
@@ -191,6 +193,64 @@ def cmd_register(args: argparse.Namespace) -> int:
     return 0 if failures == 0 else 1
 
 
+def cmd_daily(args: argparse.Namespace) -> int:
+    """Register up to daily target with circuit breaker + email on sustained failure."""
+    if args.clear_circuit:
+        st = clear_circuit()
+        print(json.dumps(st.to_dict(), indent=2))
+        return 0
+    if args.status:
+        st = load_daily_state()
+        print(json.dumps(st.to_dict(), indent=2))
+        return 2 if st.circuit_open else 0
+
+    if args.captcha_mode:
+        config.REGBOT_CAPTCHA_MODE = args.captcha_mode
+
+    try:
+        result = run_daily(
+            target=args.target,
+            batch=args.batch,
+            max_proxy_attempts=args.retries,
+            delay_s=args.delay,
+            debug=args.debug,
+            force_continue=bool(args.force_continue),
+        )
+    except Exception as error:
+        logging.getLogger(__name__).error("daily failed: %s", error)
+        print(json.dumps({"ok": False, "error": str(error)}), file=sys.stderr)
+        return 1
+
+    print(
+        json.dumps(
+            {
+                "ok": result.exit_code == 0,
+                "message": result.message,
+                "state": result.state.to_dict(),
+            },
+            indent=2,
+        )
+    )
+    return result.exit_code
+
+
+def cmd_test_alert(_args: argparse.Namespace) -> int:
+    """Send a test alert via Forward Email to REG_ALERT_TO."""
+    try:
+        payload = send_alert_email(
+            subject=f"[regbot] test alert {utc_today()}",
+            text=(
+                "This is a test alert from regbot (cmd test-alert).\n"
+                "If you received this, Forward Email outbound API is configured correctly.\n"
+            ),
+        )
+    except AlertError as error:
+        print(f"ERROR: {error}", file=sys.stderr)
+        return 1
+    print(json.dumps({"ok": True, "response": payload}, indent=2, default=str))
+    return 0
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="regbot",
@@ -288,6 +348,80 @@ notes:
         help="Captcha backend (default playwright = Chromium+CapSolver extension)",
     )
     p_reg.set_defaults(func=cmd_register)
+
+    p_daily = sub.add_parser(
+        "daily",
+        help="Register one account toward daily target (default 5/day via spaced cron)",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog="""
+examples:
+  # One account now (default batch=1); re-run later for more until target=5
+  xvfb-run -a uv run regbot daily -v --debug
+  uv run regbot daily --status
+  uv run regbot daily --clear-circuit
+
+# Space 5 attempts through the day (UTC) — NOT one burst:
+  0 8,11,14,17,20 * * * cd /path/to/regbot && xvfb-run -a uv run regbot daily -v --debug >> data/logs/daily.log 2>&1
+""",
+    )
+    _add_verbose(p_daily)
+    p_daily.add_argument(
+        "--target",
+        type=int,
+        default=None,
+        help=f"Successes to reach today (default {config.REGBOT_DAILY_TARGET})",
+    )
+    p_daily.add_argument(
+        "--batch",
+        type=int,
+        default=None,
+        help=(
+            f"Accounts to attempt this invocation (default {config.REGBOT_DAILY_BATCH}; "
+            "keep 1 and use cron to space through the day)"
+        ),
+    )
+    p_daily.add_argument(
+        "--retries",
+        type=int,
+        default=None,
+        help=f"Proxy/captcha attempts per account (default {config.REGBOT_PROXY_RETRIES})",
+    )
+    p_daily.add_argument(
+        "--delay",
+        type=float,
+        default=None,
+        help=(
+            f"Seconds between accounts only if batch>1 "
+            f"(default {config.REGBOT_ACCOUNT_DELAY_S})"
+        ),
+    )
+    p_daily.add_argument("--debug", action="store_true", default=True)
+    p_daily.add_argument("--no-debug", action="store_false", dest="debug")
+    p_daily.add_argument(
+        "--captcha-mode",
+        default=None,
+        choices=["playwright", "proxy", "proxyless", "auto", "manual"],
+    )
+    p_daily.add_argument(
+        "--force-continue",
+        action="store_true",
+        help="Ignore open circuit for this run (still re-trips on new failures)",
+    )
+    p_daily.add_argument(
+        "--clear-circuit",
+        action="store_true",
+        help="Clear awaiting_review / circuit for today and exit",
+    )
+    p_daily.add_argument(
+        "--status",
+        action="store_true",
+        help="Print today's daily state and exit",
+    )
+    p_daily.set_defaults(func=cmd_daily)
+
+    p_alert = sub.add_parser("test-alert", help="Send a test email to REG_ALERT_TO")
+    _add_verbose(p_alert)
+    p_alert.set_defaults(func=cmd_test_alert)
 
     return parser
 

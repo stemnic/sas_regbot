@@ -48,6 +48,11 @@ def _session_username(base_username: str, session_id: str) -> str:
     return f"{base_username}{replacement}"
 
 
+def _looks_like_brightdata_username(raw: str) -> bool:
+    u = (raw or "").strip().lower()
+    return u.startswith("brd-") or "brd-customer" in u or "-zone-" in u
+
+
 def _oxylabs_username(raw: str, *, country: str | None = None) -> str:
     """Build Oxylabs DC username: ``user-USERNAME`` + optional ``-country-XX``.
 
@@ -263,10 +268,20 @@ def new_sticky_proxy(session_id: str | None = None) -> StickyProxy:
     provider = (config.PROXY_PROVIDER or "oxylabs").strip().lower()
 
     if provider in {"oxylabs", "oxy", "dc.oxylabs"}:
+        raw_user = (config.PROXY_USERNAME or "").strip()
+        if _looks_like_brightdata_username(raw_user):
+            raise ProxyError(
+                "PROXY_USERNAME looks like Bright Data (brd-customer…/zone-…) but "
+                f"PROXY_PROVIDER={provider!r} and host={config.PROXY_HOST!r}. "
+                "Oxylabs needs your Oxylabs datacenter username (e.g. scraper2_…), "
+                "not a Bright Data zone string. "
+                "Either set PROXY_USERNAME/PASSWORD to Oxylabs credentials, or set "
+                "PROXY_PROVIDER=brightdata and PROXY_HOST=brd.superproxy.io:33335."
+            )
         port = session_id if session_id and session_id.isdigit() else _next_oxylabs_port()
         host_base = config.PROXY_HOST.split(":")[0] if config.PROXY_HOST else "dc.oxylabs.io"
         country = getattr(config, "OXYLABS_COUNTRY", "US") or ""
-        username = _oxylabs_username(config.PROXY_USERNAME, country=country or None)
+        username = _oxylabs_username(raw_user, country=country or None)
         proxy = StickyProxy(
             session_id=f"p{port}",
             host=f"{host_base}:{port}",

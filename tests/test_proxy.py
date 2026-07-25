@@ -35,6 +35,21 @@ def test_oxylabs_username_prefix() -> None:
     assert _oxylabs_username("user-scraper2_3mi9y", country="") == "user-scraper2_3mi9y"
 
 
+def test_oxylabs_rejects_brightdata_username(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(config, "PROXY_PROVIDER", "oxylabs")
+    monkeypatch.setattr(
+        config,
+        "PROXY_USERNAME",
+        "brd-customer-hl_303bfb33-zone-freemium",
+    )
+    monkeypatch.setattr(config, "PROXY_PASSWORD", "secret")
+    monkeypatch.setattr(config, "PROXY_HOST", "dc.oxylabs.io")
+    from regbot.proxy import ProxyError
+
+    with pytest.raises(ProxyError, match="Bright Data"):
+        new_sticky_proxy()
+
+
 def test_oxylabs_username_country_us() -> None:
     assert _oxylabs_username("scraper2_3mi9y", country="US") == "user-scraper2_3mi9y-country-US"
     assert _oxylabs_username("user-scraper2_3mi9y", country="US") == "user-scraper2_3mi9y-country-US"

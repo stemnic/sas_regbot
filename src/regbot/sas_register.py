@@ -294,8 +294,16 @@ def _is_retryable(error: BaseException) -> bool:
         (BlockedError, CapsolverError, BrowserCaptchaError, TransportError, EnrollmentRetryError),
     ):
         return True
+    # curl_cffi / libcurl proxy tunnel failures (bad IP, 400 CONNECT, etc.)
+    name = type(error).__name__.lower()
+    msg = str(error).lower()
+    if "proxy" in name or "connect tunnel failed" in msg:
+        return True
+    if "curl:" in msg and any(
+        tok in msg for tok in ("(56)", "(7)", "(28)", "407", "502", "503", "tunnel")
+    ):
+        return True
     if isinstance(error, SasHttpError):
-        msg = str(error).lower()
         body = (error.body or "").lower()
         if "captcha" in msg or "captcha" in body:
             return True
