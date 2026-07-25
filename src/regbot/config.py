@@ -40,18 +40,37 @@ PROXY_HOST = os.environ.get("PROXY_HOST", "") or os.environ.get(
     "OXYLABS_HOST",
     "dc.oxylabs.io" if PROXY_PROVIDER.startswith("oxy") else "brd.superproxy.io:33335",
 )
-OXYLABS_PORTS = os.environ.get("OXYLABS_PORTS", "8001,8002,8003,8004,8005")
-# Optional pin for debug (e.g. OXYLABS_PORT=8001). Empty = rotate across OXYLABS_PORTS.
+# Pay-per-traffic DC: sticky session = random port in [MIN, MAX] (Oxylabs docs: 8001–63000).
+OXYLABS_PORT_MIN = int(os.environ.get("OXYLABS_PORT_MIN", "8001"))
+OXYLABS_PORT_MAX = int(os.environ.get("OXYLABS_PORT_MAX", "63000"))
+# Optional pin for debug (forces a single sticky port for every attempt).
 OXYLABS_PORT = os.environ.get("OXYLABS_PORT", "").strip()
-# roundrobin (default, persisted across CLI runs) | random (avoid last-used)
-REGBOT_PROXY_ROTATE = os.environ.get("REGBOT_PROXY_ROTATE", "roundrobin").strip().lower()
-# Cross-process port rotation state (so each uv run does not restart at 8001)
+# Legacy fixed port list (only if OXYLABS_USE_PORT_LIST=true)
+OXYLABS_PORTS = os.environ.get("OXYLABS_PORTS", "8001,8002,8003,8004,8005")
+OXYLABS_USE_PORT_LIST = os.environ.get("OXYLABS_USE_PORT_LIST", "false").lower() in {
+    "1",
+    "true",
+    "yes",
+}
+# ppt (default, pay-per-traffic random port) | random | roundrobin (legacy list modes)
+REGBOT_PROXY_ROTATE = os.environ.get("REGBOT_PROXY_ROTATE", "ppt").strip().lower()
+# Persist last_port (avoid immediate reuse) / legacy list cursor
 REGBOT_PROXY_STATE_PATH = os.environ.get(
     "REGBOT_PROXY_STATE_PATH", "data/oxy_port_state.json"
 )
 
 
+def oxylabs_port_range() -> tuple[int, int]:
+    lo, hi = OXYLABS_PORT_MIN, OXYLABS_PORT_MAX
+    if lo < 1:
+        lo = 8001
+    if hi < lo:
+        hi = lo
+    return lo, hi
+
+
 def oxylabs_ports() -> list[str]:
+    """Legacy explicit port list (only used when OXYLABS_USE_PORT_LIST is set)."""
     if OXYLABS_PORT:
         return [OXYLABS_PORT]
     ports = [p.strip() for p in OXYLABS_PORTS.split(",") if p.strip()]

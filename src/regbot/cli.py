@@ -131,10 +131,20 @@ def cmd_register(args: argparse.Namespace) -> int:
     if args.captcha_mode:
         config.REGBOT_CAPTCHA_MODE = args.captcha_mode
 
+    if config.PROXY_PROVIDER.startswith("oxy"):
+        if config.OXYLABS_PORT:
+            oxy_desc = f"pin={config.OXYLABS_PORT}"
+        elif getattr(config, "OXYLABS_USE_PORT_LIST", False):
+            oxy_desc = f"list={config.oxylabs_ports()}"
+        else:
+            lo, hi = config.oxylabs_port_range()
+            oxy_desc = f"ppt={lo}-{hi}"
+    else:
+        oxy_desc = "n/a"
     logging.getLogger(__name__).info(
-        "effective: captcha_mode=%s oxy_ports=%s provider=%s",
+        "effective: captcha_mode=%s oxy=%s provider=%s",
         config.REGBOT_CAPTCHA_MODE,
-        config.oxylabs_ports() if config.PROXY_PROVIDER.startswith("oxy") else "n/a",
+        oxy_desc,
         config.PROXY_PROVIDER,
     )
     if (config.REGBOT_CAPTCHA_MODE or "").strip().lower() in {"proxy", "proxyless"}:

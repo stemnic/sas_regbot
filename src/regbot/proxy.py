@@ -22,7 +22,7 @@ _oxy_lock = threading.Lock()
 
 
 def reset_oxylabs_port_cycle() -> None:
-    """Clear persisted rotation state (tests)."""
+    """Clear persisted port state (tests)."""
     path = _state_path()
     with _oxy_lock:
         try:
@@ -87,23 +87,60 @@ def _save_state(state: dict) -> None:
 
 
 def _next_oxylabs_port() -> str:
-    """Pick next Oxylabs DC port — sticky within one attempt, rotated across CLI runs.
+    """Pick Oxylabs DC sticky session port for this registration attempt.
 
-    State is persisted to disk so each ``uv run regbot`` continues the cycle instead
-    of always landing on the same port (in-memory rotation is useless for --count 1).
+    **Pay-per-traffic (default):** random port in ``[OXYLABS_PORT_MIN, OXYLABS_PORT_MAX]``
+    (docs: 8001–63000). Same port for the whole attempt ⇒ sticky IP; new port ⇒ new IP.
 
-    - ``roundrobin`` (default): walk a shuffled pool, cursor saved on disk.
-    - ``random``: pick uniformly among ports other than last-used.
+    **Pin:** ``OXYLABS_PORT`` forces one port.
+
+    **Legacy list:** ``OXYLABS_USE_PORT_LIST=true`` + ``OXYLABS_PORTS`` +
+    ``REGBOT_PROXY_ROTATE=roundrobin|random``.
     """
+    pin = (getattr(config, "OXYLABS_PORT", None) or "").strip()
+    if pin:
+        return pin
+
+    use_list = bool(getattr(config, "OXYLABS_USE_PORT_LIST", False))
+    mode = (getattr(config, "REGBOT_PROXY_ROTATE", "ppt") or "ppt").strip().lower()
+
+    # Default / ppt: pay-per-traffic random sticky port
+    if not use_list and mode not in {"roundrobin", "list"}:
+        lo, hi = config.oxylabs_port_range()
+        with _oxy_lock:
+            state = _load_state()
+            last = str(state.get("last_port") or "")
+            port = random.randint(lo, hi)
+            # Avoid immediate reuse of last session port when range is wide
+            if hi > lo and last.isdigit():
+                for _ in range(8):
+                    if str(port) != last:
+                        break
+                    port = random.randint(lo, hi)
+            state = {
+                "last_port": str(port),
+                "mode": "ppt",
+                "min": lo,
+                "max": hi,
+            }
+            _save_state(state)
+        logger.info(
+            "Oxylabs pay-per-traffic session port=%s (range %s–%s, last=%s)",
+            port,
+            lo,
+            hi,
+            last or "-",
+        )
+        return str(port)
+
+    # Legacy fixed port list
     ports = config.oxylabs_ports()
     if not ports:
         return "8001"
     if len(ports) == 1:
         return ports[0]
 
-    mode = (getattr(config, "REGBOT_PROXY_ROTATE", "roundrobin") or "roundrobin").strip().lower()
     pool = [str(p) for p in ports]
-
     with _oxy_lock:
         state = _load_state()
         last = str(state.get("last_port") or "")
@@ -114,14 +151,13 @@ def _next_oxylabs_port() -> str:
             state = {"last_port": port, "mode": "random", "pool": pool}
             _save_state(state)
             logger.info(
-                "Oxylabs port pick=%s last=%s mode=random pool=%s",
+                "Oxylabs list port pick=%s last=%s mode=random pool=%s",
                 port,
                 last or "-",
                 pool,
             )
             return port
 
-        # roundrobin with persisted shuffled order
         order = state.get("order")
         if not isinstance(order, list) or sorted(str(x) for x in order) != sorted(pool):
             order = list(pool)
@@ -147,12 +183,11 @@ def _next_oxylabs_port() -> str:
         }
         _save_state(state)
         logger.info(
-            "Oxylabs port pick=%s last=%s mode=roundrobin cursor=%s→%s order=%s",
+            "Oxylabs list port pick=%s last=%s mode=roundrobin cursor=%s→%s",
             port,
             last or "-",
             cursor,
             next_cursor,
-            order,
         )
         return port
 
@@ -216,11 +251,14 @@ def new_sticky_proxy(session_id: str | None = None) -> StickyProxy:
             password=config.PROXY_PASSWORD,
             provider="oxylabs",
         )
+        lo, hi = config.oxylabs_port_range()
         logger.info(
-            "Oxylabs sticky lease %s (rotate=%s pool=%s)",
+            "Oxylabs sticky lease %s (user=%s host=%s ppt_range=%s-%s)",
             proxy.label,
-            getattr(config, "REGBOT_PROXY_ROTATE", "roundrobin"),
-            config.oxylabs_ports(),
+            proxy.username[:24],
+            proxy.host,
+            lo,
+            hi,
         )
         return proxy
 
