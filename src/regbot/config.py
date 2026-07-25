@@ -206,6 +206,21 @@ REGBOT_REQUIRE_MULLVAD = os.environ.get("REGBOT_REQUIRE_MULLVAD", "true").lower(
 # Empty = auto-detect (wg0-mullvad preferred)
 REGBOT_BIND_INTERFACE = os.environ.get("REGBOT_BIND_INTERFACE", "wg0-mullvad").strip()
 REGBOT_MULLVAD_BIN = os.environ.get("REGBOT_MULLVAD_BIN", "mullvad").strip() or "mullvad"
+# Optional am.i.mullvad exit probe (slow/flaky); default off — Connected CLI + iface is enough
+REGBOT_MULLVAD_PROBE_EXIT = os.environ.get("REGBOT_MULLVAD_PROBE_EXIT", "false").lower() in {
+    "1",
+    "true",
+    "yes",
+}
+REGBOT_MULLVAD_PROBE_TIMEOUT_S = float(os.environ.get("REGBOT_MULLVAD_PROBE_TIMEOUT_S", "3"))
+# Force curl_cffi interface= on Oxylabs CONNECT (usually unnecessary; can hang)
+REGBOT_CURL_BIND_INTERFACE = os.environ.get("REGBOT_CURL_BIND_INTERFACE", "false").lower() in {
+    "1",
+    "true",
+    "yes",
+}
+# Fail-fast proxy egress check (ipify via sticky) before warm/OTP
+REGBOT_PROXY_IP_TIMEOUT_S = float(os.environ.get("REGBOT_PROXY_IP_TIMEOUT_S", "15"))
 
 # Daily automation — space attempts across the day via cron (one account per run by default)
 REGBOT_DAILY_TARGET = int(os.environ.get("REGBOT_DAILY_TARGET", "5"))

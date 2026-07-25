@@ -388,7 +388,10 @@ def register_once(
                     report.proxy_ip = user_ip
                     report.mark("proxy_ip", ip=user_ip)
                 except Exception as error:
-                    logger.warning("Could not resolve proxy IP: %s", error)
+                    # Dead Oxylabs port / CONNECT hang — rotate proxy, do not warm
+                    raise TransportError(
+                        f"Proxy egress check failed ({proxy.label}): {error}"
+                    ) from error
 
             html_warm = client.warm_html()
             report.mark("warm_html", result=html_warm)

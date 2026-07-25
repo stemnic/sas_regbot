@@ -259,10 +259,11 @@ def cmd_test_alert(_args: argparse.Namespace) -> int:
 
 def cmd_check_mullvad(_args: argparse.Namespace) -> int:
     """Require Mullvad Connected and print bind interface / exit IP."""
-    from .netguard import MullvadNotConnectedError, require_mullvad
+    from .netguard import MullvadNotConnectedError, check_mullvad
 
     try:
-        bind = require_mullvad(probe_exit=True)
+        # Fresh check + optional short exit probe (ops visibility)
+        bind = check_mullvad(probe_exit=True)
     except MullvadNotConnectedError as error:
         print(f"FAIL: {error}", file=sys.stderr)
         return 2

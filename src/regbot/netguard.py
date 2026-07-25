@@ -1,10 +1,12 @@
 """Mullvad preflight and host bind resolution.
 
 Ensures registration runs only when Mullvad is Connected, and exposes the
-WireGuard interface name / bind IP for outbound host sockets (CapSolver API,
-OpenInbox, alerts, direct Google, and the local leg of Oxylabs CONNECT).
+WireGuard bind IP for host-originated HTTPS (CapSolver, OpenInbox, alerts,
+direct Google).
 
-SAS product egress remains Oxylabs; this only pins *this machine's* source.
+SAS product egress remains Oxylabs. Local sockets to Oxylabs follow the OS
+default route (already Mullvad when Connected + kill switch); we do not force
+curl_cffi ``interface=`` on CONNECT by default (that caused flaky timeouts).
 """
 
 from __future__ import annotations
@@ -71,11 +73,20 @@ def get_bind_ip() -> str | None:
 
 
 def get_curl_interface() -> str | None:
-    """Value for curl_cffi ``interface=`` (prefer iface name, else bind IP)."""
+    """Optional curl_cffi ``interface=`` value (only when REGBOT_CURL_BIND_INTERFACE)."""
+    if not getattr(config, "REGBOT_CURL_BIND_INTERFACE", False):
+        return None
     st = _state
     if st is None or st.skipped:
         return None
-    return st.interface or st.bind_ip
+    # Prefer bind IP over iface name (more reliable with policy routing)
+    return st.bind_ip or st.interface
+
+
+def clear_mullvad_cache() -> None:
+    """Reset process-wide preflight cache (tests / reconnect)."""
+    global _state
+    _state = None
 
 
 def _run_mullvad_status(bin_path: str) -> str:
@@ -175,37 +186,38 @@ def resolve_interface_and_ip(
     )
 
 
-def _optional_exit_probe(bind_ip: str | None, interface: str | None) -> tuple[str | None, bool | None]:
-    """Best-effort exit IP via am.i.mullvad (does not fail preflight)."""
-    if not bind_ip and not interface:
-        return None, None
+def _optional_exit_probe() -> tuple[str | None, bool | None]:
+    """Best-effort exit IP via default route (no interface=). Short timeout."""
     try:
         from curl_cffi import requests as cffi_requests
 
-        iface = interface or bind_ip
+        timeout = float(getattr(config, "REGBOT_MULLVAD_PROBE_TIMEOUT_S", 3.0) or 3.0)
         resp = cffi_requests.get(
             "https://am.i.mullvad.net/json",
-            timeout=12,
-            interface=iface,
+            timeout=max(1.0, timeout),
         )
         data: Any = resp.json() if resp.status_code == 200 else {}
         ip = str(data.get("ip") or "") or None
         is_mullvad = bool(data.get("mullvad_exit_ip"))
         return ip, is_mullvad if ip else None
     except Exception as error:
-        logger.debug("Mullvad exit probe failed (non-fatal): %s", error)
+        logger.debug("Mullvad exit probe skipped/failed (non-fatal): %s", error)
         return None, None
 
 
 def require_mullvad(
     *,
     force: bool | None = None,
-    probe_exit: bool = True,
+    probe_exit: bool | None = None,
+    use_cache: bool = True,
 ) -> MullvadBind:
     """Require Mullvad Connected + resolve bind, configure HTTP bind, store state.
 
     When ``REGBOT_REQUIRE_MULLVAD`` is false (or force=False), skip checks and
     clear bind so host uses OS default routing.
+
+    Cached for the process after the first successful Connected preflight so
+    ``daily`` + ``register_once`` do not double-probe / double-stall.
     """
     global _state
 
@@ -224,9 +236,25 @@ def require_mullvad(
         logger.warning("Mullvad preflight skipped (REGBOT_REQUIRE_MULLVAD=false)")
         return bind
 
+    # Reuse prior Connected bind (skip slow exit probe / iface re-resolve)
+    if (
+        use_cache
+        and _state is not None
+        and _state.connected
+        and not _state.skipped
+        and _state.bind_ip
+    ):
+        logger.debug("Mullvad preflight cache hit: %s", _state.as_log())
+        return _state
+
+    do_probe = (
+        bool(getattr(config, "REGBOT_MULLVAD_PROBE_EXIT", False))
+        if probe_exit is None
+        else bool(probe_exit)
+    )
+
     bin_path = (config.REGBOT_MULLVAD_BIN or "mullvad").strip() or "mullvad"
     if not shutil.which(bin_path) and bin_path == "mullvad":
-        # Still try absolute common path
         for candidate in ("/usr/bin/mullvad", "/usr/local/bin/mullvad"):
             if shutil.which(candidate) or __import__("pathlib").Path(candidate).is_file():
                 bin_path = candidate
@@ -235,6 +263,7 @@ def require_mullvad(
     status_raw = _run_mullvad_status(bin_path)
     connected = parse_mullvad_connected(status_raw)
     if not connected:
+        _state = None
         raise MullvadNotConnectedError(
             "Mullvad is not Connected. Connect with `mullvad connect` before running regbot.\n"
             f"status:\n{status_raw or '(empty)'}"
@@ -245,8 +274,8 @@ def require_mullvad(
 
     exit_ip: str | None = None
     probe_ok: bool | None = None
-    if probe_exit:
-        exit_ip, probe_ok = _optional_exit_probe(bind_ip, interface)
+    if do_probe:
+        exit_ip, probe_ok = _optional_exit_probe()
 
     bind = MullvadBind(
         connected=True,
@@ -266,13 +295,14 @@ def require_mullvad(
     logger.info("Mullvad preflight ok: %s", bind.as_log())
     if probe_ok is False:
         logger.warning(
-            "Bound exit probe did not report mullvad_exit_ip=true (exit=%s) — "
-            "check routing; continuing with interface bind",
+            "Exit probe did not report mullvad_exit_ip=true (exit=%s) — "
+            "continuing (OS default route + kill switch still apply)",
             exit_ip,
         )
     return bind
 
 
-def check_mullvad(*, probe_exit: bool = True) -> MullvadBind:
-    """Ops helper: run preflight with current config (may raise)."""
-    return require_mullvad(probe_exit=probe_exit)
+def check_mullvad(*, probe_exit: bool | None = True) -> MullvadBind:
+    """Ops helper: fresh preflight (no cache); optional exit probe for check-mullvad."""
+    clear_mullvad_cache()
+    return require_mullvad(probe_exit=probe_exit, use_cache=False)

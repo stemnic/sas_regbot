@@ -106,7 +106,7 @@ class ProxiedSession:
         self.impersonate = impersonate or config.REGBOT_IMPERSONATE
         self.timeout = timeout if timeout is not None else config.REGBOT_REQUEST_TIMEOUT_S
         self._session_factory = session_factory
-        # Bind local sockets to Mullvad WG when preflight set a bind (source of CONNECT)
+        # Optional: force curl interface= (default off — OS Mullvad route is enough)
         try:
             from .netguard import get_curl_interface
 
@@ -147,6 +147,7 @@ class ProxiedSession:
         expect_json: bool = True,
         user_agent: str | None = None,
         cookies: str | None = None,
+        timeout: float | None = None,
     ) -> Any:
         """Issue a request. SAS URLs always require the sticky proxy (enforced)."""
         if is_sas_url(url) or not allow_non_sas:
@@ -176,15 +177,23 @@ class ProxiedSession:
         req_kwargs: dict[str, Any] = {
             "json": json_body,
             "headers": req_headers,
-            "timeout": self.timeout,
+            "timeout": self.timeout if timeout is None else timeout,
         }
         if self._interface:
             req_kwargs["interface"] = self._interface
-        response = self._session.request(
-            method.upper(),
-            url,
-            **req_kwargs,
-        )
+        try:
+            response = self._session.request(
+                method.upper(),
+                url,
+                **req_kwargs,
+            )
+        except Exception as error:
+            # Surface libcurl proxy/tunnel failures as TransportError (retryable)
+            msg = str(error)
+            name = type(error).__name__
+            if "curl:" in msg.lower() or "proxy" in name.lower():
+                raise TransportError(f"{name}: {msg}") from error
+            raise
         status = int(response.status_code)
         text = str(response.text or "")
         resp_headers = getattr(response, "headers", {}) or {}
@@ -269,14 +278,24 @@ class ProxiedSession:
             session_factory=self._session_factory,
         )
 
-    def get_proxy_ip(self) -> str:
-        """Return egress IP as seen through the sticky proxy (ipify)."""
+    def get_proxy_ip(self, *, timeout: float | None = None) -> str:
+        """Return egress IP as seen through the sticky proxy (ipify).
+
+        Uses a short timeout by default so a dead Oxylabs port fails fast and
+        the registration loop can rotate.
+        """
+        t = (
+            timeout
+            if timeout is not None
+            else float(getattr(config, "REGBOT_PROXY_IP_TIMEOUT_S", 15) or 15)
+        )
         data = self.request(
             "GET",
             "https://api.ipify.org/?format=json",
             headers={"Accept": "application/json"},
             allow_non_sas=True,
             expect_json=True,
+            timeout=t,
         )
         ip = str(data.get("ip") or "").strip()
         if not ip:
