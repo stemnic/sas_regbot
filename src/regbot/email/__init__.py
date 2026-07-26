@@ -6,8 +6,11 @@ from .base import (
     EmailProviderError,
     FixedEmailProvider,
     Inbox,
+    StickyEmailProvider,
     get_email_provider,
+    get_rotating_email_provider,
 )
+from .mailhook import MailhookProvider
 from .openinbox import OpenInboxProvider
 
 __all__ = [
@@ -16,6 +19,9 @@ __all__ = [
     "EmailProviderError",
     "FixedEmailProvider",
     "Inbox",
+    "MailhookProvider",
     "OpenInboxProvider",
+    "StickyEmailProvider",
     "get_email_provider",
+    "get_rotating_email_provider",
 ]

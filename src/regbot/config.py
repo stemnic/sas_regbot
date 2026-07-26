@@ -14,6 +14,7 @@ _ENV_PREFIXES = (
     "REGBOT_",
     "OPENINBOX_",
     "ANYMESSAGE_",
+    "MAILHOOK_",
     "FORWARDEMAIL_",
     "REG_ALERT_",
 )
@@ -148,11 +149,17 @@ def oxylabs_ports() -> list[str]:
 # CapSolver
 CAPSOLVER_API_KEY = os.environ.get("CAPSOLVER_API_KEY", "")
 
-# Email provider (OTP path is direct — not proxied). Default: OpenInbox.
-EMAIL_PROVIDER = os.environ.get("EMAIL_PROVIDER", "openinbox").strip().lower()
+# Email provider (OTP path is direct — not proxied).
+# openinbox | mailhook | anymessage | rotate | manual | fake | http
+# rotate = weighted pick (default openinbox:5,mailhook:1 → Mailhook ~1/6)
+EMAIL_PROVIDER = os.environ.get("EMAIL_PROVIDER", "rotate").strip().lower()
 EMAIL_API_KEY = os.environ.get("EMAIL_API_KEY", "")
 EMAIL_API_BASE = os.environ.get("EMAIL_API_BASE", "").rstrip("/")
 EMAIL_DOMAIN = os.environ.get("EMAIL_DOMAIN", "")
+# Weighted rotation, e.g. openinbox:5,mailhook:1  (empty → default when rotate)
+EMAIL_PROVIDER_WEIGHTS = os.environ.get(
+    "EMAIL_PROVIDER_WEIGHTS", "openinbox:5,mailhook:1"
+).strip()
 
 # OpenInbox (https://openinbox.io/api-docs) — preferred automatic OTP source
 OPENINBOX_API_KEY = os.environ.get("OPENINBOX_API_KEY", "") or EMAIL_API_KEY
@@ -175,6 +182,59 @@ ANYMESSAGE_BASE_URL = os.environ.get(
 ).rstrip("/")
 ANYMESSAGE_ORDER_REGEX = os.environ.get("ANYMESSAGE_ORDER_REGEX", "")
 ANYMESSAGE_ORDER_SUBJECT = os.environ.get("ANYMESSAGE_ORDER_SUBJECT", "")
+
+# Mailhook (https://app.mailhook.co/llms.txt) — temp mail, ~1/6 via rotate
+MAILHOOK_AGENT_ID = os.environ.get("MAILHOOK_AGENT_ID", "").strip()
+MAILHOOK_API_KEY = os.environ.get("MAILHOOK_API_KEY", "").strip()
+MAILHOOK_BASE_URL = os.environ.get(
+    "MAILHOOK_BASE_URL", "https://app.mailhook.co/api/v1"
+).rstrip("/")
+MAILHOOK_DOMAIN_ID = os.environ.get("MAILHOOK_DOMAIN_ID", "").strip()
+MAILHOOK_TAILME_SLUG = os.environ.get("MAILHOOK_TAILME_SLUG", "").strip()
+MAILHOOK_CREDENTIALS_PATH = os.environ.get(
+    "MAILHOOK_CREDENTIALS_PATH", "data/mailhook_credentials.json"
+)
+MAILHOOK_AUTO_REGISTER = os.environ.get("MAILHOOK_AUTO_REGISTER", "true").lower() in {
+    "1",
+    "true",
+    "yes",
+}
+# On free-tier 1-address limit: delete oldest address once, then retry create
+REGBOT_MAILHOOK_PRUNE_OLDEST = os.environ.get(
+    "REGBOT_MAILHOOK_PRUNE_OLDEST", "true"
+).lower() in {"1", "true", "yes"}
+
+
+def parse_email_provider_weights(
+    raw: str | None = None,
+) -> list[tuple[str, float]]:
+    """Parse ``openinbox:5,mailhook:1`` into ``[(name, weight), ...]``.
+
+    Empty / invalid entries are skipped. If nothing parses, returns the default
+    openinbox:5 + mailhook:1 rotation (Mailhook ~1/6).
+    """
+    text = (raw if raw is not None else EMAIL_PROVIDER_WEIGHTS or "").strip()
+    out: list[tuple[str, float]] = []
+    if text:
+        for part in text.split(","):
+            part = part.strip()
+            if not part:
+                continue
+            if ":" in part:
+                name, _, w = part.partition(":")
+                name = name.strip().lower()
+                try:
+                    weight = float(w.strip())
+                except ValueError:
+                    continue
+            else:
+                name = part.lower()
+                weight = 1.0
+            if name and weight > 0:
+                out.append((name, weight))
+    if not out:
+        out = [("openinbox", 5.0), ("mailhook", 1.0)]
+    return out
 
 # Registration behaviour
 # Prefer a modern Firefox profile that still works with curl_cffi on this host

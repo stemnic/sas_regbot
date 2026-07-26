@@ -40,6 +40,7 @@ _SYSTEMIC_MARKERS = (
     "rate limit",
     "plan allows",
     "openinbox auth",
+    "mailhook auth",
     "forward email",
     "mullvad",
     "not connected",
@@ -243,17 +244,23 @@ def run_daily(
             message=f"Quota already met for {day} ({state.success}/{target_n})",
         )
 
-    provider = email_provider or get_email_provider()
+    # When caller injects a provider, reuse it; otherwise re-pick per account so
+    # EMAIL_PROVIDER=rotate applies weights (Mailhook ~1/6) each slot.
+    fixed_provider = email_provider
 
     for i in range(to_run):
         if state.circuit_open:
             break
+        provider = fixed_provider or get_email_provider()
+        chosen = getattr(provider, "name", None) or config.EMAIL_PROVIDER
         logger.info(
-            "=== daily account slot %s/%s this run (day remaining was %s, max %s proxy tries) ===",
+            "=== daily account slot %s/%s this run (day remaining was %s, max %s proxy tries) "
+            "email_provider=%s ===",
             i + 1,
             to_run,
             remaining,
             retries,
+            chosen,
         )
         try:
             account: RegisteredAccount = register_with_retries(

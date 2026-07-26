@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import logging
+import random
 import re
 import time
 from dataclasses import dataclass, field
@@ -9,6 +11,8 @@ from typing import Any, Protocol
 
 from .. import config
 from ..profile import OTP_RE
+
+logger = logging.getLogger(__name__)
 
 DEFAULT_OTP_PATTERN = re.compile(r"\b(\d{6})\b")
 
@@ -247,25 +251,40 @@ class HttpEmailProvider:
         raise EmailProviderError(f"OTP timeout after {timeout}s for {inbox.address}")
 
 
-def get_email_provider(
-    name: str | None = None,
-    *,
-    fixed_email: str | None = None,
-    fixed_otp: str | None = None,
-) -> EmailProvider:
-    """Return an email provider.
+class StickyEmailProvider:
+    """Wrap a pre-selected provider; exposes which name was chosen."""
 
-    If ``fixed_email`` is set, always use :class:`FixedEmailProvider` (manual custom flow),
-    regardless of ``EMAIL_PROVIDER``.
-    """
-    if fixed_email:
-        return FixedEmailProvider(fixed_email, otp=fixed_otp)
+    def __init__(self, name: str, inner: EmailProvider) -> None:
+        self.name = name
+        self.inner = inner
 
-    provider = (name or config.EMAIL_PROVIDER or "openinbox").strip().lower()
+    def create_inbox(self, *, prefix: str | None = None) -> Inbox:
+        return self.inner.create_inbox(prefix=prefix)
+
+    def wait_for_otp(
+        self,
+        inbox: Inbox,
+        *,
+        timeout_s: float | None = None,
+        poll_s: float | None = None,
+        pattern: re.Pattern[str] | None = None,
+    ) -> str:
+        return self.inner.wait_for_otp(
+            inbox, timeout_s=timeout_s, poll_s=poll_s, pattern=pattern
+        )
+
+
+def _build_named_provider(name: str) -> EmailProvider:
+    """Construct a single concrete provider by name (no rotation)."""
+    provider = name.strip().lower()
     if provider in {"openinbox", "open-inbox", "open_inbox", "oi"}:
         from .openinbox import OpenInboxProvider
 
         return OpenInboxProvider.from_config()
+    if provider in {"mailhook", "mail-hook", "mail_hook", "mh"}:
+        from .mailhook import MailhookProvider
+
+        return MailhookProvider.from_config()
     if provider in {"anymessage", "any-message", "any_message"}:
         from .anymessage import AnyMessageProvider
 
@@ -284,5 +303,112 @@ def get_email_provider(
         )
     raise EmailProviderError(
         f"Unknown EMAIL_PROVIDER={provider!r}. "
-        "Use openinbox|anymessage|manual|fake|http."
+        "Use openinbox|mailhook|anymessage|rotate|manual|fake|http."
     )
+
+
+def _try_build_named(name: str) -> EmailProvider | None:
+    try:
+        return _build_named_provider(name)
+    except Exception as error:  # noqa: BLE001 — soft-skip missing creds in rotate
+        logger.warning("Email provider %s unavailable for rotation: %s", name, error)
+        return None
+
+
+def pick_weighted_provider_name(
+    weights: list[tuple[str, float]] | None = None,
+    *,
+    rng: random.Random | None = None,
+) -> str:
+    """Pick a provider name by weight (default openinbox:5, mailhook:1)."""
+    pairs = weights if weights is not None else config.parse_email_provider_weights()
+    if not pairs:
+        return "openinbox"
+    r = rng or random
+    total = sum(w for _, w in pairs)
+    if total <= 0:
+        return pairs[0][0]
+    roll = r.random() * total
+    acc = 0.0
+    for name, weight in pairs:
+        acc += weight
+        if roll <= acc:
+            return name
+    return pairs[-1][0]
+
+
+def get_rotating_email_provider(
+    *,
+    rng: random.Random | None = None,
+    weights: list[tuple[str, float]] | None = None,
+) -> StickyEmailProvider:
+    """Weighted pick among available providers (Mailhook ~1/6 by default).
+
+    Picks once and sticks for the returned instance so create_inbox + wait_for_otp
+    use the same backend. Call again per registration account for diversification.
+    """
+    pairs = list(weights if weights is not None else config.parse_email_provider_weights())
+    # Prefer stable order for tests / logs
+    available: list[tuple[str, float, EmailProvider]] = []
+    for name, weight in pairs:
+        built = _try_build_named(name)
+        if built is not None:
+            available.append((name, weight, built))
+
+    if not available:
+        # Last resort: try openinbox then mailhook without weights
+        for fallback in ("openinbox", "mailhook", "anymessage"):
+            built = _try_build_named(fallback)
+            if built is not None:
+                logger.warning(
+                    "Email rotation: no weighted providers available; using %s",
+                    fallback,
+                )
+                return StickyEmailProvider(fallback, built)
+        raise EmailProviderError(
+            "No email providers available for rotation. "
+            "Configure OPENINBOX_API_KEY and/or Mailhook credentials."
+        )
+
+    if len(available) == 1:
+        name, _, built = available[0]
+        logger.info("Email rotation: only %s available", name)
+        return StickyEmailProvider(name, built)
+
+    weight_pairs = [(n, w) for n, w, _ in available]
+    chosen = pick_weighted_provider_name(weight_pairs, rng=rng)
+    for name, _, built in available:
+        if name == chosen:
+            logger.info(
+                "Email rotation: selected %s (weights=%s)",
+                name,
+                ",".join(f"{n}:{w:g}" for n, w in weight_pairs),
+            )
+            return StickyEmailProvider(name, built)
+    # Should not happen
+    name, _, built = available[0]
+    return StickyEmailProvider(name, built)
+
+
+def get_email_provider(
+    name: str | None = None,
+    *,
+    fixed_email: str | None = None,
+    fixed_otp: str | None = None,
+    rng: random.Random | None = None,
+) -> EmailProvider:
+    """Return an email provider.
+
+    If ``fixed_email`` is set, always use :class:`FixedEmailProvider` (manual custom flow),
+    regardless of ``EMAIL_PROVIDER``.
+
+    ``rotate`` (or default with weights) picks openinbox vs mailhook with
+    configured weights (default 5:1 → Mailhook 1/6 of the time).
+    """
+    if fixed_email:
+        return FixedEmailProvider(fixed_email, otp=fixed_otp)
+
+    provider = (name or config.EMAIL_PROVIDER or "rotate").strip().lower()
+    if provider in {"rotate", "rotating", "weighted", "auto"}:
+        return get_rotating_email_provider(rng=rng)
+    return _build_named_provider(provider)

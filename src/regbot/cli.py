@@ -120,6 +120,12 @@ def cmd_register(args: argparse.Namespace) -> int:
     try:
         # Manual --email: always prompt for OTP after requestOtp unless replaying.
         fixed_otp = args.otp if (args.email and skip_request_otp) else None
+        # Build once when fixed email / non-rotate; re-pick per account under rotate.
+        email_name = (args.email_provider or config.EMAIL_PROVIDER or "rotate").strip().lower()
+        re_pick = (
+            not args.email
+            and email_name in {"rotate", "rotating", "weighted", "auto", ""}
+        )
         provider = get_email_provider(
             args.email_provider,
             fixed_email=args.email,
@@ -144,10 +150,11 @@ def cmd_register(args: argparse.Namespace) -> int:
     else:
         oxy_desc = "n/a"
     logging.getLogger(__name__).info(
-        "effective: captcha_mode=%s oxy=%s provider=%s",
+        "effective: captcha_mode=%s oxy=%s provider=%s email=%s",
         config.REGBOT_CAPTCHA_MODE,
         oxy_desc,
         config.PROXY_PROVIDER,
+        getattr(provider, "name", None) or email_name,
     )
     if (config.REGBOT_CAPTCHA_MODE or "").strip().lower() in {"proxy", "proxyless"}:
         logging.getLogger(__name__).warning(
@@ -159,6 +166,20 @@ def cmd_register(args: argparse.Namespace) -> int:
     for i in range(args.count):
         if args.count > 1:
             logging.getLogger(__name__).info("=== account %s/%s ===", i + 1, args.count)
+        if re_pick and i > 0:
+            try:
+                provider = get_email_provider(args.email_provider)
+            except Exception as error:
+                logging.getLogger(__name__).error("Email provider pick failed: %s", error)
+                failures += 1
+                if args.fail_fast:
+                    return 1
+                continue
+        if re_pick or i == 0:
+            logging.getLogger(__name__).info(
+                "email_provider=%s",
+                getattr(provider, "name", None) or email_name,
+            )
         try:
             account = register_with_retries(
                 email_provider=provider,
@@ -351,7 +372,7 @@ notes:
     p_reg.add_argument(
         "--email-provider",
         default=None,
-        help="Override EMAIL_PROVIDER (openinbox|anymessage|manual|fake|http)",
+        help="Override EMAIL_PROVIDER (openinbox|mailhook|rotate|anymessage|manual|fake|http)",
     )
     p_reg.add_argument(
         "--email",
