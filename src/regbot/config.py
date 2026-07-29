@@ -167,11 +167,29 @@ OPENINBOX_BASE_URL = os.environ.get(
     "OPENINBOX_BASE_URL", "https://api.openinbox.io/api"
 ).rstrip("/")
 OPENINBOX_DOMAIN = os.environ.get("OPENINBOX_DOMAIN", EMAIL_DOMAIN)
+# Domains SAS rejects — discard + recreate if OpenInbox assigns one.
+# Default when env unset; set OPENINBOX_BANNED_DOMAINS= to disable.
+_DEFAULT_OPENINBOX_BANNED = "teminbox.click,myfamilysync.app"
+OPENINBOX_BANNED_DOMAINS_RAW = os.environ.get(
+    "OPENINBOX_BANNED_DOMAINS", _DEFAULT_OPENINBOX_BANNED
+)
 # On concurrent-inbox limit: delete only the oldest inbox once, then retry create.
 # Keep other inboxes for late/misdelivered mail after account creation.
 REGBOT_OPENINBOX_PRUNE_OLDEST = os.environ.get(
     "REGBOT_OPENINBOX_PRUNE_OLDEST", "true"
 ).lower() in {"1", "true", "yes"}
+
+
+def openinbox_banned_domains(raw: str | None = None) -> frozenset[str]:
+    """Parse comma-separated OpenInbox ban list (lowercased hostnames)."""
+    text = OPENINBOX_BANNED_DOMAINS_RAW if raw is None else raw
+    if text is None:
+        return frozenset()
+    return frozenset(
+        part.strip().lower().lstrip("@")
+        for part in str(text).split(",")
+        if part.strip()
+    )
 
 # AnyMessage (https://anymessage.shop/en/docs) — optional fallback
 ANYMESSAGE_TOKEN = os.environ.get("ANYMESSAGE_TOKEN", "") or EMAIL_API_KEY

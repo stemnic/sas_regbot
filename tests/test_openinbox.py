@@ -77,13 +77,13 @@ def test_list_emails_uses_v1_when_inbound_wrong() -> None:
 
 
 def test_create_inbox_v1() -> None:
-    provider = OpenInboxProvider(api_key="tmp_test_key")
+    provider = OpenInboxProvider(api_key="tmp_test_key", banned_domains=frozenset())
     create = MagicMock()
     create.status_code = 200
-    create.content = b'{"success":true,"data":{"id":"abc","email":"a@teminbox.click"}}'
+    create.content = b'{"success":true,"data":{"id":"abc","email":"a@splitsmarter.com"}}'
     create.json.return_value = {
         "success": True,
-        "data": {"id": "abc", "email": "a@teminbox.click"},
+        "data": {"id": "abc", "email": "a@splitsmarter.com"},
     }
     create.text = create.content.decode()
     session = MagicMock()
@@ -91,9 +91,112 @@ def test_create_inbox_v1() -> None:
     provider._session = session
 
     inbox = provider.create_inbox()
-    assert inbox.address == "a@teminbox.click"
+    assert inbox.address == "a@splitsmarter.com"
     assert inbox.external_id == "abc"
     assert "/v1/inboxes" in session.request.call_args[0][1]
+
+
+def test_create_inbox_rejects_banned_domain_and_retries() -> None:
+    banned = frozenset({"teminbox.click", "myfamilysync.app"})
+    provider = OpenInboxProvider(api_key="tmp_test_key", banned_domains=banned)
+
+    bad = MagicMock()
+    bad.status_code = 200
+    bad.content = (
+        b'{"success":true,"data":{"id":"bad1","email":"x@teminbox.click"}}'
+    )
+    bad.json.return_value = {
+        "success": True,
+        "data": {"id": "bad1", "email": "x@teminbox.click"},
+    }
+    bad.text = bad.content.decode()
+
+    deleted = MagicMock()
+    deleted.status_code = 200
+    deleted.content = b'{"success":true}'
+    deleted.json.return_value = {"success": True}
+    deleted.text = deleted.content.decode()
+
+    good = MagicMock()
+    good.status_code = 200
+    good.content = (
+        b'{"success":true,"data":{"id":"good1","email":"y@splitsmarter.com"}}'
+    )
+    good.json.return_value = {
+        "success": True,
+        "data": {"id": "good1", "email": "y@splitsmarter.com"},
+    }
+    good.text = good.content.decode()
+
+    session = MagicMock()
+    # POST create banned → DELETE → POST create ok
+    session.request.side_effect = [bad, deleted, good]
+    provider._session = session
+
+    inbox = provider.create_inbox(prefix="jane.doe")
+    assert inbox.address == "y@splitsmarter.com"
+    assert inbox.external_id == "good1"
+    methods = [c[0][0].upper() for c in session.request.call_args_list]
+    paths = [c[0][1] for c in session.request.call_args_list]
+    assert methods == ["POST", "DELETE", "POST"]
+    assert any("bad1" in p for p in paths)
+
+
+def test_create_inbox_rejects_myfamilysync() -> None:
+    banned = frozenset({"teminbox.click", "myfamilysync.app"})
+    provider = OpenInboxProvider(api_key="tmp_test_key", banned_domains=banned)
+
+    bad = MagicMock()
+    bad.status_code = 200
+    bad.content = (
+        b'{"success":true,"data":{"id":"m1","email":"a@myfamilysync.app"}}'
+    )
+    bad.json.return_value = {
+        "success": True,
+        "data": {"id": "m1", "email": "a@myfamilysync.app"},
+    }
+    bad.text = bad.content.decode()
+
+    deleted = MagicMock()
+    deleted.status_code = 200
+    deleted.content = b"{}"
+    deleted.json.return_value = {}
+    deleted.text = ""
+
+    good = MagicMock()
+    good.status_code = 200
+    good.content = (
+        b'{"success":true,"data":{"id":"m2","email":"b@teminbox.xyz"}}'
+    )
+    good.json.return_value = {
+        "success": True,
+        "data": {"id": "m2", "email": "b@teminbox.xyz"},
+    }
+    good.text = good.content.decode()
+
+    session = MagicMock()
+    session.request.side_effect = [bad, deleted, good]
+    provider._session = session
+
+    inbox = provider.create_inbox()
+    assert inbox.address == "b@teminbox.xyz"
+
+
+def test_default_banned_domains() -> None:
+    from regbot.config import openinbox_banned_domains
+
+    banned = openinbox_banned_domains()
+    assert "teminbox.click" in banned
+    assert "myfamilysync.app" in banned
+
+
+def test_is_banned_domain_helper() -> None:
+    from regbot.email.openinbox import is_banned_domain
+
+    banned = frozenset({"teminbox.click", "myfamilysync.app"})
+    assert is_banned_domain("user@teminbox.click", banned)
+    assert is_banned_domain("myfamilysync.app", banned)
+    assert not is_banned_domain("user@splitsmarter.com", banned)
 
 
 def test_create_inbox_sends_prefix() -> None:

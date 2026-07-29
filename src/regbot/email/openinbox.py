@@ -51,6 +51,21 @@ def looks_like_inbox_limit(message: str) -> bool:
     return False
 
 
+def email_domain(address: str) -> str:
+    """Return lowercased domain part of an email (or bare hostname)."""
+    text = (address or "").strip().lower()
+    if "@" in text:
+        return text.rsplit("@", 1)[-1].strip()
+    return text.lstrip("@").strip()
+
+
+def is_banned_domain(address_or_domain: str, banned: frozenset[str] | set[str]) -> bool:
+    """True if the address/host is on the OpenInbox ban list."""
+    if not banned:
+        return False
+    return email_domain(address_or_domain) in banned
+
+
 def extract_otp(blob: str, pattern: re.Pattern[str] | None = None) -> str | None:
     """Pull a 6-digit OTP from HTML or plain text."""
     otp_re = pattern or DEFAULT_OTP_PATTERN
@@ -106,6 +121,7 @@ class OpenInboxProvider:
         api_key: str,
         base_url: str = "https://api.openinbox.io/api",
         domain: str = "",
+        banned_domains: frozenset[str] | set[str] | None = None,
         timeout: float = 30,
         session: requests.Session | None = None,
     ) -> None:
@@ -119,6 +135,11 @@ class OpenInboxProvider:
         self.base_url = base_url.rstrip("/")
         self.domain = domain.strip()
         self.timeout = timeout
+        self.banned_domains = frozenset(
+            banned_domains
+            if banned_domains is not None
+            else config.openinbox_banned_domains()
+        )
         if session is not None:
             self._session = session
         else:
@@ -129,10 +150,19 @@ class OpenInboxProvider:
     @classmethod
     def from_config(cls) -> OpenInboxProvider:
         key = (config.OPENINBOX_API_KEY or config.EMAIL_API_KEY or "").strip()
+        preferred = (config.OPENINBOX_DOMAIN or "").strip()
+        banned = config.openinbox_banned_domains()
+        if preferred and is_banned_domain(preferred, banned):
+            logger.warning(
+                "OPENINBOX_DOMAIN=%s is banned; ignoring preferred domain",
+                preferred,
+            )
+            preferred = ""
         return cls(
             api_key=key,
             base_url=config.OPENINBOX_BASE_URL,
-            domain=config.OPENINBOX_DOMAIN,
+            domain=preferred,
+            banned_domains=banned,
         )
 
     def _headers(self, *, json_body: bool = False) -> dict[str, str]:
@@ -258,6 +288,9 @@ class OpenInboxProvider:
         ``prefix`` is sent as OpenInbox ``prefix`` (e.g. ``john.smith`` →
         ``john.smith@…``). On conflict, retries with a numeric suffix.
 
+        Domains in ``banned_domains`` (e.g. teminbox.click) are deleted and
+        recreated until a non-banned host is returned.
+
         On concurrent-inbox limit: free **one oldest** inbox (if enabled) and
         retry the same create once — never bulk-delete; never delete after enroll.
         """
@@ -265,12 +298,21 @@ class OpenInboxProvider:
 
         base_prefix = (prefix or "").strip().lower()
         base_prefix = re.sub(r"[^a-z0-9._-]", "", base_prefix).strip("._-")
+        preferred_domain = self.domain.strip()
+        if preferred_domain and is_banned_domain(preferred_domain, self.banned_domains):
+            logger.warning(
+                "OpenInbox preferred domain %s is banned; using random domain",
+                preferred_domain,
+            )
+            preferred_domain = ""
+
         last_error: Exception | None = None
         pruned_once = False
-        for attempt in range(5):
+        # Extra attempts so ban-list discards do not exhaust name-collision budget.
+        for attempt in range(10):
             payload: dict[str, Any] = {}
-            if self.domain:
-                payload["domain"] = self.domain
+            if preferred_domain:
+                payload["domain"] = preferred_domain
             if base_prefix:
                 # Prefer bare first.last; only add digits if earlier create failed
                 if attempt == 0:
@@ -347,6 +389,30 @@ class OpenInboxProvider:
             if not inbox_id:
                 last_error = EmailProviderError(f"OpenInbox create_inbox missing id: {raw}")
                 continue
+
+            if is_banned_domain(str(address), self.banned_domains):
+                dom = email_domain(str(address))
+                logger.warning(
+                    "OpenInbox banned domain %s for %s — deleting and retrying",
+                    dom,
+                    address,
+                )
+                try:
+                    self.delete_inbox(str(inbox_id))
+                except EmailProviderError as del_err:
+                    logger.warning(
+                        "OpenInbox failed to delete banned inbox %s: %s",
+                        inbox_id,
+                        del_err,
+                    )
+                last_error = EmailProviderError(
+                    f"OpenInbox assigned banned domain {dom} (address={address})"
+                )
+                # Drop preferred domain for further tries if it led here somehow
+                if preferred_domain and email_domain(preferred_domain) == dom:
+                    preferred_domain = ""
+                continue
+
             logger.info(
                 "OpenInbox inbox ready email=%s id=%s prefix=%s pruned_oldest=%s",
                 address,
@@ -364,8 +430,10 @@ class OpenInboxProvider:
                     "pruned_oldest": pruned_once,
                 },
             )
+        banned = ",".join(sorted(self.banned_domains)) or "(none)"
         raise EmailProviderError(
-            f"OpenInbox create_inbox failed after retries: {last_error}"
+            f"OpenInbox create_inbox failed after retries "
+            f"(banned_domains={banned}): {last_error}"
         ) from last_error
 
     def _list_emails(self, inbox: Inbox) -> list[dict[str, Any]]:
