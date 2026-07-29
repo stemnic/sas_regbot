@@ -197,6 +197,9 @@ def cmd_register(args: argparse.Namespace) -> int:
                         "eb_number": account.eb_number,
                         "password": account.password,
                         "proxy_label": account.proxy_label,
+                        "already_existed": bool(
+                            getattr(account, "already_existed", False)
+                        ),
                     },
                     indent=2,
                 )
@@ -372,7 +375,7 @@ notes:
     p_reg.add_argument(
         "--email-provider",
         default=None,
-        help="Override EMAIL_PROVIDER (openinbox|mailhook|rotate|anymessage|manual|fake|http)",
+        help="Override EMAIL_PROVIDER (openinbox|mailhook|freecustom|rotate|anymessage|manual|fake|http)",
     )
     p_reg.add_argument(
         "--email",

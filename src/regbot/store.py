@@ -31,6 +31,8 @@ class RegisteredAccount:
     proxy_ip: str | None = None
     created_at: float = field(default_factory=time.time)
     enrollment_raw_path: str | None = None
+    # True when SAS enroll returned 1015004 (email already exists) — treat as success
+    already_existed: bool = False
     extra: dict[str, Any] = field(default_factory=dict)
 
     def to_dict(self) -> dict[str, Any]:

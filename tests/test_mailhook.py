@@ -246,3 +246,210 @@ def test_rotating_selects_mailhook_with_seeded_rng(monkeypatch: pytest.MonkeyPat
 def test_requires_credentials() -> None:
     with pytest.raises(EmailProviderError, match="MAILHOOK_AGENT_ID"):
         MailhookProvider(agent_id="", api_key="")
+
+
+def _json_resp(payload: dict) -> MagicMock:
+    m = MagicMock()
+    m.status_code = 200
+    import json as _json
+
+    raw = _json.dumps(payload).encode()
+    m.content = raw
+    m.text = raw.decode()
+    m.json.return_value = payload
+    return m
+
+
+def test_pick_domain_reuses_under_cap() -> None:
+    provider = MailhookProvider(
+        agent_id="mh_test",
+        api_key="key",
+        max_emails_per_domain=2,
+        auto_ensure_domain=True,
+    )
+    domains = _json_resp(
+        {
+            "data": [
+                {
+                    "id": "10",
+                    "attributes": {
+                        "name": "maple.tail.me",
+                        "ready": True,
+                        "email_addresses_count": 1,
+                    },
+                }
+            ]
+        }
+    )
+    emails = _json_resp(
+        {
+            "data": [
+                {
+                    "id": "ea_1",
+                    "attributes": {
+                        "email": "a@maple.tail.me",
+                        "domain_id": 10,
+                    },
+                }
+            ]
+        }
+    )
+    session = MagicMock()
+    # pick: GET emails, GET domains
+    session.request.side_effect = [emails, domains]
+    provider._session = session
+
+    with patch("regbot.email.mailhook._persist_domain_id"):
+        did = provider.pick_domain_for_inbox()
+    assert did == "10"
+
+
+def test_pick_domain_rotates_when_at_cap() -> None:
+    provider = MailhookProvider(
+        agent_id="mh_test",
+        api_key="key",
+        max_emails_per_domain=2,
+        auto_ensure_domain=True,
+    )
+    domains = _json_resp(
+        {
+            "data": [
+                {
+                    "id": "10",
+                    "attributes": {
+                        "name": "maple.tail.me",
+                        "ready": True,
+                        "email_addresses_count": 2,
+                    },
+                }
+            ]
+        }
+    )
+    emails = _json_resp(
+        {
+            "data": [
+                {
+                    "id": "ea_1",
+                    "attributes": {"email": "a@maple.tail.me", "domain_id": 10},
+                },
+                {
+                    "id": "ea_2",
+                    "attributes": {"email": "b@maple.tail.me", "domain_id": 10},
+                },
+            ]
+        }
+    )
+    created = _json_resp(
+        {
+            "data": {
+                "id": "99",
+                "attributes": {"name": "willow.tail.me", "ready": True},
+            }
+        }
+    )
+    session = MagicMock()
+    # GET emails, GET domains (full), POST new domain
+    session.request.side_effect = [emails, domains, created]
+    provider._session = session
+
+    with patch("regbot.email.mailhook._persist_domain_id"), patch(
+        "regbot.email.mailhook._random_tailme_slug", return_value="willow"
+    ):
+        did = provider.pick_domain_for_inbox()
+    assert did == "99"
+    post = session.request.call_args_list[-1]
+    assert post[0][0].upper() == "POST"
+    assert post.kwargs["json"]["tailme_slug"] == "willow"
+
+
+def test_create_inbox_rotates_subdomain_when_full() -> None:
+    provider = MailhookProvider(
+        agent_id="mh_test",
+        api_key="key",
+        max_emails_per_domain=2,
+        auto_ensure_domain=True,
+    )
+    domains = _json_resp(
+        {
+            "data": [
+                {
+                    "id": "10",
+                    "attributes": {
+                        "name": "full.tail.me",
+                        "ready": True,
+                        "email_addresses_count": 2,
+                    },
+                }
+            ]
+        }
+    )
+    emails = _json_resp(
+        {
+            "data": [
+                {"id": "ea_1", "attributes": {"email": "a@full.tail.me", "domain_id": 10}},
+                {"id": "ea_2", "attributes": {"email": "b@full.tail.me", "domain_id": 10}},
+            ]
+        }
+    )
+    new_domain = _json_resp(
+        {"data": {"id": "20", "attributes": {"name": "cedar.tail.me", "ready": True}}}
+    )
+    new_inbox = _json_resp(
+        {
+            "data": {
+                "id": "ea_3",
+                "attributes": {"email": "c@cedar.tail.me", "active": True},
+            }
+        }
+    )
+    session = MagicMock()
+    session.request.side_effect = [emails, domains, new_domain, new_inbox]
+    provider._session = session
+
+    with patch("regbot.email.mailhook._persist_domain_id"), patch(
+        "regbot.email.mailhook._random_tailme_slug", return_value="cedar"
+    ):
+        inbox = provider.create_inbox(prefix="c.user")
+    assert inbox.address == "c@cedar.tail.me"
+    assert inbox.meta["domain_id"] == "20"
+    create_body = session.request.call_args_list[-1].kwargs["json"]
+    assert create_body["domain_id"] == "20"
+
+
+def test_pick_prefers_fullest_under_cap() -> None:
+    """Use domain with 1 email before empty domain when both under cap."""
+    provider = MailhookProvider(
+        agent_id="mh_test",
+        api_key="key",
+        max_emails_per_domain=2,
+        auto_ensure_domain=True,
+    )
+    domains = _json_resp(
+        {
+            "data": [
+                {
+                    "id": "1",
+                    "attributes": {"name": "empty.tail.me", "ready": True},
+                },
+                {
+                    "id": "2",
+                    "attributes": {"name": "one.tail.me", "ready": True},
+                },
+            ]
+        }
+    )
+    emails = _json_resp(
+        {
+            "data": [
+                {
+                    "id": "ea_1",
+                    "attributes": {"email": "a@one.tail.me", "domain_id": 2},
+                }
+            ]
+        }
+    )
+    session = MagicMock()
+    session.request.side_effect = [emails, domains]
+    provider._session = session
+    with patch("regbot.email.mailhook._persist_domain_id"):
+        assert provider.pick_domain_for_inbox() == "2"

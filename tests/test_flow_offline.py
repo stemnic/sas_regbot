@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 from typing import Any
 from unittest.mock import MagicMock, patch
 
@@ -127,6 +128,117 @@ def test_register_once_happy_path(
     assert mock_captcha.call_args.kwargs["proxy"] is proxy
     session.sibling.assert_called()
     enroll_session.close.assert_called()
+
+
+def test_email_already_exists_response() -> None:
+    from regbot.sas_register import email_already_exists_response
+
+    payload = {
+        "errorInfo": [
+            {
+                "errorCode": "1015004",
+                "errorMessage": "The entered email address already exists. Please login. ",
+                "type": "Error",
+            }
+        ],
+        "links": [],
+    }
+    assert email_already_exists_response(payload) is True
+    assert email_already_exists_response({}, body=json.dumps(payload)) is True
+    assert email_already_exists_response({"errorInfo": []}) is False
+    assert (
+        email_already_exists_response(
+            {"errorInfo": [{"errorCode": "1015001", "errorMessage": "captcha bad"}]}
+        )
+        is False
+    )
+
+
+@patch("regbot.netguard.require_mullvad")
+@patch("regbot.sas_register.solve_captcha", return_value=_fake_solution())
+@patch("regbot.sas_register.ProxiedSession")
+@patch("regbot.sas_register.new_sticky_proxy")
+def test_register_already_existed_is_success(
+    mock_proxy: MagicMock,
+    mock_session_cls: MagicMock,
+    mock_captcha: MagicMock,
+    _mock_mullvad: MagicMock,
+    tmp_path: Any,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """SAS 1015004 (email already exists) is treated as successful registration."""
+    from regbot.proxy import StickyProxy
+    from regbot.transport import SasHttpError
+
+    monkeypatch.setattr("regbot.sas_register.config.PROXY_USERNAME", "user")
+    monkeypatch.setattr("regbot.sas_register.config.PROXY_PASSWORD", "pass")
+    monkeypatch.setattr("regbot.sas_register.config.CAPSOLVER_API_KEY", "cap-key")
+    monkeypatch.setattr("regbot.sas_register.config.REGBOT_CAPTCHA_MODE", "proxy")
+    monkeypatch.setattr("regbot.sas_register.config.REGBOT_CAPTCHA_RETRIES", 1)
+    monkeypatch.setattr("regbot.sas_register.config.REGBOT_REFRESH_TOKEN_EACH_ENROLL", False)
+    monkeypatch.setattr("regbot.sas_register.config.REGBOT_ACCOUNTS_DIR", str(tmp_path))
+    monkeypatch.setattr("regbot.store.config.REGBOT_ACCOUNTS_DIR", str(tmp_path))
+
+    proxy = StickyProxy(
+        "sess12345678", "brd.superproxy.io:33335", "user-session-sess12345678", "pass"
+    )
+    mock_proxy.return_value = proxy
+
+    session = MagicMock()
+    enroll_session = MagicMock()
+    mock_session_cls.return_value.__enter__.return_value = session
+    mock_session_cls.return_value.__exit__.return_value = None
+    session.sibling.return_value = enroll_session
+    session.get_proxy_ip.return_value = "1.2.3.4"
+
+    exists_payload = {
+        "errorInfo": [
+            {
+                "errorCode": "1015004",
+                "errorMessage": "The entered email address already exists. Please login. ",
+                "type": "Error",
+            }
+        ],
+        "links": [],
+    }
+
+    def post(url: str, **kwargs: Any) -> dict:
+        if url.endswith("requestOtp"):
+            return {"emailSendStatus": "success", "registrationStatus": "EMAIL_SENT"}
+        if url.endswith("validateOtp"):
+            return {"enrollmentToken": "jwt-token", "registrationStatus": "VERIFIED"}
+        if url.endswith("enrollment"):
+            raise SasHttpError(
+                "HTTP 400",
+                status=400,
+                body=json.dumps(exists_payload),
+                payload=exists_payload,
+            )
+        raise AssertionError(url)
+
+    def get(url: str, **kwargs: Any) -> dict:
+        if "agreement" in url:
+            return {"version": 3, "memberType": "EB"}
+        raise AssertionError(url)
+
+    session.post.side_effect = post
+    session.get.side_effect = get
+    enroll_session.post.side_effect = post
+    enroll_session.close = MagicMock()
+
+    account = register_once(
+        email_provider=FakeEmailProvider("exists@example.com", "755461"),
+        debug=False,
+        fetch_proxy_ip=True,
+    )
+    assert account.already_existed is True
+    assert account.email == "exists@example.com"
+    assert account.eb_number is None
+    assert account.extra.get("sas_error_code") == "1015004"
+    saved = list(tmp_path.glob("*.json"))
+    assert saved
+    data = json.loads(saved[0].read_text(encoding="utf-8"))
+    assert data["already_existed"] is True
 
 
 def test_classify_otp_already_verified() -> None:

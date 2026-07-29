@@ -21,8 +21,41 @@ from .transport import BlockedError, ProxiedSession, SasHttpError, TransportErro
 
 logger = logging.getLogger(__name__)
 
+
 def _default_ua() -> str:
     return config.REGBOT_USER_AGENT
+
+
+def email_already_exists_response(payload: Any, body: str = "") -> bool:
+    """True when SAS enroll reports the email is already registered (1015004).
+
+    This is treated as a successful outcome: the account exists on SAS even if
+    enroll HTTP status is 400 / missing EB number.
+    """
+    if isinstance(payload, dict):
+        info = payload.get("errorInfo")
+        if isinstance(info, list):
+            for item in info:
+                if not isinstance(item, dict):
+                    continue
+                code = str(item.get("errorCode") or "").strip()
+                msg = str(item.get("errorMessage") or "").lower()
+                if code == "1015004":
+                    return True
+                if "already exists" in msg and "email" in msg:
+                    return True
+        # some payloads nest errors differently
+        err = payload.get("error")
+        if isinstance(err, dict):
+            if str(err.get("errorCode") or "") == "1015004":
+                return True
+    blob = body or ""
+    if "1015004" in blob:
+        return True
+    low = blob.lower()
+    if "already exists" in low and "email" in low:
+        return True
+    return False
 
 
 class RegistrationError(RuntimeError):
@@ -402,8 +435,19 @@ def register_once(
                 email = resume.email
                 report.email = email
                 report.mark("resume_verified", email=email, token_present=True)
+                # Always reuse the profile/password from the OTP attempt.
+                profile = resume.profile or profile
                 if profile is None:
                     profile = generate_us_profile(email=email)
+                    logger.warning(
+                        "resume missing profile — generated new password for %s",
+                        email,
+                    )
+                logger.info(
+                    "credentials email=%s password=%s (resume)",
+                    email,
+                    profile.password,
+                )
             else:
                 # Generate identity first so OpenInbox can use name as email prefix
                 if profile is None:
@@ -430,6 +474,26 @@ def register_once(
                 email = inbox.address
                 report.email = email
                 report.mark("email_ready", email=email, prefix=prefix)
+                # Log plaintext credentials early so failures (e.g. 1015004) still
+                # leave email+password in daily/cron logs even if save is skipped.
+                logger.info(
+                    "credentials email=%s password=%s",
+                    email,
+                    profile.password,
+                )
+                if run_dir:
+                    _save_json(
+                        run_dir,
+                        "credentials.json",
+                        {
+                            "email": email,
+                            "password": profile.password,
+                            "first_name": profile.first_name,
+                            "last_name": profile.last_name,
+                            "phone": profile.phone,
+                            "date_of_birth": profile.date_of_birth,
+                        },
+                    )
 
                 if skip_request_otp:
                     report.mark("request_otp_skipped")
@@ -500,6 +564,7 @@ def register_once(
             modes = _captcha_modes()
             captcha_tries = max(1, config.REGBOT_CAPTCHA_RETRIES)
             last_enroll_error: BaseException | None = None
+            already_existed = False
 
             forced_captcha_ua = (config.REGBOT_CAPTCHA_USER_AGENT or "").strip() or None
 
@@ -618,49 +683,86 @@ def register_once(
                         if status >= 400 or (
                             isinstance(payload, dict) and payload.get("errorInfo")
                         ):
-                            last_enroll_error = SasHttpError(
-                                f"Browser enroll HTTP {status} via={browser_result.enroll_via}",
-                                status=status,
-                                body=body_text[:4000],
-                                payload=payload,
-                            )
-                            logger.warning(
-                                "Enrollment HTTP %s mode=%s via=%s jti=%s: %s",
-                                status,
-                                mode,
-                                browser_result.enroll_via,
-                                _jwt_jti(enrollment_token),
-                                (body_text or "")[:500],
-                            )
-                            _save_json(
-                                run_dir,
-                                f"enrollment_error_{mode}_{attempt_i}.json",
-                                {
-                                    "status": status,
-                                    "body": body_text,
-                                    "payload": payload,
-                                    "enroll_via": browser_result.enroll_via,
-                                    "request": {
-                                        "userName": email,
-                                        "password": "***",
-                                        "enrollmentToken_jti": _jwt_jti(enrollment_token),
-                                        "captcha_len": len(captcha),
-                                        "captcha_mode": mode,
-                                        "enroll_via": browser_result.enroll_via,
-                                        "proxy_label": proxy.label,
-                                        "proxy_ip": report.proxy_ip,
-                                        "task_type": solution.task_type,
-                                    },
-                                },
-                            )
-                            # auto: fall through to curl enroll with same token
-                            if enroll_via == "auto":
+                            if email_already_exists_response(payload, body_text):
+                                already_existed = True
+                                enroll_resp = (
+                                    payload if isinstance(payload, dict) else {}
+                                )
+                                if not enroll_resp and body_text:
+                                    try:
+                                        enroll_resp = json.loads(body_text)
+                                    except Exception:
+                                        enroll_resp = {
+                                            "errorInfo": [
+                                                {
+                                                    "errorCode": "1015004",
+                                                    "errorMessage": body_text[:500],
+                                                }
+                                            ]
+                                        }
                                 logger.info(
-                                    "Browser enroll failed; trying curl enroll with same captcha"
+                                    "Enrollment reports email already exists (1015004) "
+                                    "email=%s password=%s — treating as success "
+                                    "already_existed=true",
+                                    email,
+                                    profile.password,
+                                )
+                                report.mark(
+                                    "enroll_already_existed",
+                                    email=email,
+                                    password=profile.password,
+                                    status=status,
+                                    error_code="1015004",
                                 )
                             else:
-                                _write_run_report(report)
-                                continue
+                                last_enroll_error = SasHttpError(
+                                    f"Browser enroll HTTP {status} via={browser_result.enroll_via}",
+                                    status=status,
+                                    body=body_text[:4000],
+                                    payload=payload,
+                                )
+                                logger.warning(
+                                    "Enrollment HTTP %s mode=%s via=%s jti=%s "
+                                    "email=%s password=%s: %s",
+                                    status,
+                                    mode,
+                                    browser_result.enroll_via,
+                                    _jwt_jti(enrollment_token),
+                                    email,
+                                    profile.password,
+                                    (body_text or "")[:500],
+                                )
+                                _save_json(
+                                    run_dir,
+                                    f"enrollment_error_{mode}_{attempt_i}.json",
+                                    {
+                                        "status": status,
+                                        "body": body_text,
+                                        "payload": payload,
+                                        "enroll_via": browser_result.enroll_via,
+                                        "request": {
+                                            "userName": email,
+                                            "password": profile.password,
+                                            "enrollmentToken_jti": _jwt_jti(
+                                                enrollment_token
+                                            ),
+                                            "captcha_len": len(captcha),
+                                            "captcha_mode": mode,
+                                            "enroll_via": browser_result.enroll_via,
+                                            "proxy_label": proxy.label,
+                                            "proxy_ip": report.proxy_ip,
+                                            "task_type": solution.task_type,
+                                        },
+                                    },
+                                )
+                                # auto: fall through to curl enroll with same token
+                                if enroll_via == "auto":
+                                    logger.info(
+                                        "Browser enroll failed; trying curl enroll with same captcha"
+                                    )
+                                else:
+                                    _write_run_report(report)
+                                    continue
                         else:
                             enroll_resp = payload if isinstance(payload, dict) else {}
                             if not enroll_resp and body_text:
@@ -748,40 +850,81 @@ def register_once(
                                     sec_ch_ua=solution.sec_ch_ua if solution else None,
                                 )
                             except SasHttpError as error:
-                                last_enroll_error = error
-                                body_snip = (error.body or "")[:500]
-                                logger.warning(
-                                    "Enrollment HTTP %s mode=%s jti=%s imp=%s: %s",
-                                    error.status,
-                                    mode,
-                                    _jwt_jti(enrollment_token),
-                                    enroll_impersonate,
-                                    body_snip,
-                                )
-                                _save_json(
-                                    run_dir,
-                                    f"enrollment_error_{mode}_{attempt_i}.json",
-                                    {
-                                        "status": error.status,
-                                        "body": error.body,
-                                        "payload": error.payload,
-                                        "request": {
-                                            "userName": email,
-                                            "password": "***",
-                                            "enrollmentToken_jti": _jwt_jti(enrollment_token),
-                                            "captcha_len": len(captcha),
-                                            "captcha_mode": mode,
-                                            "enroll_via": "curl",
-                                            "enroll_impersonate": enroll_impersonate,
-                                            "proxy_label": proxy.label,
-                                            "proxy_ip": report.proxy_ip,
+                                if email_already_exists_response(
+                                    error.payload, error.body or ""
+                                ):
+                                    already_existed = True
+                                    enroll_resp = (
+                                        error.payload
+                                        if isinstance(error.payload, dict)
+                                        else {
+                                            "errorInfo": [
+                                                {
+                                                    "errorCode": "1015004",
+                                                    "errorMessage": (error.body or "")[
+                                                        :500
+                                                    ],
+                                                }
+                                            ]
+                                        }
+                                    )
+                                    logger.info(
+                                        "Enrollment reports email already exists (1015004) "
+                                        "email=%s password=%s — treating as success "
+                                        "already_existed=true",
+                                        email,
+                                        profile.password,
+                                    )
+                                    report.mark(
+                                        "enroll_already_existed",
+                                        email=email,
+                                        password=profile.password,
+                                        status=error.status,
+                                        error_code="1015004",
+                                    )
+                                else:
+                                    last_enroll_error = error
+                                    body_snip = (error.body or "")[:500]
+                                    logger.warning(
+                                        "Enrollment HTTP %s mode=%s jti=%s imp=%s "
+                                        "email=%s password=%s: %s",
+                                        error.status,
+                                        mode,
+                                        _jwt_jti(enrollment_token),
+                                        enroll_impersonate,
+                                        email,
+                                        profile.password,
+                                        body_snip,
+                                    )
+                                    _save_json(
+                                        run_dir,
+                                        f"enrollment_error_{mode}_{attempt_i}.json",
+                                        {
+                                            "status": error.status,
+                                            "body": error.body,
+                                            "payload": error.payload,
+                                            "request": {
+                                                "userName": email,
+                                                "password": profile.password,
+                                                "enrollmentToken_jti": _jwt_jti(
+                                                    enrollment_token
+                                                ),
+                                                "captcha_len": len(captcha),
+                                                "captcha_mode": mode,
+                                                "enroll_via": "curl",
+                                                "enroll_impersonate": enroll_impersonate,
+                                                "proxy_label": proxy.label,
+                                                "proxy_ip": report.proxy_ip,
+                                            },
                                         },
-                                    },
-                                )
-                                _write_run_report(report)
-                                continue
+                                    )
+                                    _write_run_report(report)
+                                    continue
                         finally:
                             enroll_session.close()
+
+                    if enroll_resp is None:
+                        continue
 
                     raw_path = _save_json(run_dir, "enrollment.json", enroll_resp)
                     eb = None
@@ -790,7 +933,16 @@ def register_once(
                     except (KeyError, TypeError):
                         pass
                     crm = enroll_resp.get("crmReference")
-                    if not eb and enroll_resp.get("errorInfo"):
+                    if not already_existed and email_already_exists_response(
+                        enroll_resp
+                    ):
+                        already_existed = True
+                        report.mark(
+                            "enroll_already_existed",
+                            email=email,
+                            error_code="1015004",
+                        )
+                    if not eb and enroll_resp.get("errorInfo") and not already_existed:
                         last_enroll_error = RegistrationError(
                             f"enrollment error: {enroll_resp.get('errorInfo')}",
                             stage="enroll",
@@ -813,15 +965,32 @@ def register_once(
                         proxy_label=proxy.label,
                         proxy_ip=report.proxy_ip,
                         enrollment_raw_path=raw_path,
+                        already_existed=already_existed,
+                        extra=(
+                            {
+                                "sas_error_code": "1015004",
+                                "sas_note": "email already exists; treated as success",
+                            }
+                            if already_existed
+                            else {}
+                        ),
                     )
                     path = save_account(account)
-                    report.result = "success"
-                    report.mark("saved", path=str(path), eb_number=account.eb_number)
+                    report.result = (
+                        "success_already_existed" if already_existed else "success"
+                    )
+                    report.mark(
+                        "saved",
+                        path=str(path),
+                        eb_number=account.eb_number,
+                        already_existed=already_existed,
+                    )
                     _write_run_report(report)
                     logger.info(
-                        "Registered %s EB=%s proxy=%s path=%s",
+                        "Registered %s EB=%s already_existed=%s proxy=%s path=%s",
                         account.email,
                         account.eb_number,
+                        already_existed,
                         proxy.label,
                         path,
                     )
@@ -873,7 +1042,7 @@ def register_with_retries(
             )
             return register_once(
                 email_provider=email_provider,
-                profile=profile,
+                profile=(resume.profile if resume else profile),
                 debug=debug,
                 fetch_proxy_ip=fetch_proxy_ip,
                 skip_request_otp=skip_request_otp,
@@ -882,11 +1051,16 @@ def register_with_retries(
         except EnrollmentRetryError as error:
             last = error
             resume = error.resume
+            # Keep profile (password) on outer retries as well.
+            if resume and resume.profile is not None:
+                profile = resume.profile
             if attempt >= attempts:
                 raise
             logger.warning(
-                "Enroll/captcha failed; keeping enrollmentToken for %s — new proxy (%s/%s): %s",
+                "Enroll/captcha failed; keeping enrollmentToken for %s "
+                "password=%s — new proxy (%s/%s): %s",
                 resume.email,
+                resume.profile.password if resume.profile else "?",
                 attempt,
                 attempts,
                 error,

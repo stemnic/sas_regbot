@@ -285,6 +285,10 @@ def _build_named_provider(name: str) -> EmailProvider:
         from .mailhook import MailhookProvider
 
         return MailhookProvider.from_config()
+    if provider in {"freecustom", "free-custom", "free_custom", "fce", "freecustomemail"}:
+        from .freecustom import FreeCustomProvider
+
+        return FreeCustomProvider.from_config()
     if provider in {"anymessage", "any-message", "any_message"}:
         from .anymessage import AnyMessageProvider
 
@@ -303,7 +307,7 @@ def _build_named_provider(name: str) -> EmailProvider:
         )
     raise EmailProviderError(
         f"Unknown EMAIL_PROVIDER={provider!r}. "
-        "Use openinbox|mailhook|anymessage|rotate|manual|fake|http."
+        "Use openinbox|mailhook|freecustom|anymessage|rotate|manual|fake|http."
     )
 
 
@@ -320,7 +324,7 @@ def pick_weighted_provider_name(
     *,
     rng: random.Random | None = None,
 ) -> str:
-    """Pick a provider name by weight (default openinbox:5, mailhook:1)."""
+    """Pick a provider name by weight (default openinbox:3, freecustom:5, mailhook:1)."""
     pairs = weights if weights is not None else config.parse_email_provider_weights()
     if not pairs:
         return "openinbox"

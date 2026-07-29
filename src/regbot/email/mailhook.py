@@ -183,6 +183,7 @@ class MailhookProvider:
         base_url: str = "https://app.mailhook.co/api/v1",
         domain_id: str = "",
         tailme_slug: str = "",
+        max_emails_per_domain: int | None = None,
         timeout: float = 30,
         session: requests.Session | None = None,
         auto_ensure_domain: bool = True,
@@ -200,6 +201,14 @@ class MailhookProvider:
         self.tailme_slug = (tailme_slug or "").strip()
         self.timeout = timeout
         self._auto_ensure_domain = auto_ensure_domain
+        self.max_emails_per_domain = max(
+            1,
+            int(
+                max_emails_per_domain
+                if max_emails_per_domain is not None
+                else getattr(config, "MAILHOOK_MAX_EMAILS_PER_DOMAIN", 2)
+            ),
+        )
         if session is not None:
             self._session = session
         else:
@@ -216,6 +225,7 @@ class MailhookProvider:
             base_url=config.MAILHOOK_BASE_URL,
             domain_id=domain_id or config.MAILHOOK_DOMAIN_ID,
             tailme_slug=slug or config.MAILHOOK_TAILME_SLUG,
+            max_emails_per_domain=getattr(config, "MAILHOOK_MAX_EMAILS_PER_DOMAIN", 2),
         )
 
     def _headers(self, *, json_body: bool = False) -> dict[str, str]:
@@ -282,50 +292,64 @@ class MailhookProvider:
             ) from error
         return data
 
-    def ensure_domain(self) -> str:
-        """Return a usable domain_id, creating a shared domain if needed."""
-        if self.domain_id:
-            return self.domain_id
-
+    def list_domains(self) -> list[dict[str, Any]]:
         raw = self._request("GET", "/domains")
         data = _unwrap_data(raw)
-        rows: list[dict[str, Any]] = []
         if isinstance(data, list):
-            rows = [r for r in data if isinstance(r, dict)]
-        elif isinstance(data, dict):
-            # some APIs nest list under data.domains
+            return [r for r in data if isinstance(r, dict)]
+        if isinstance(data, dict):
             for key in ("domains", "items"):
                 val = data.get(key)
                 if isinstance(val, list):
-                    rows = [r for r in val if isinstance(r, dict)]
-                    break
+                    return [r for r in val if isinstance(r, dict)]
+        return []
 
-        for row in rows:
+    def list_email_addresses(self) -> list[dict[str, Any]]:
+        raw = self._request("GET", "/email_addresses")
+        data = _unwrap_data(raw)
+        if isinstance(data, list):
+            return [r for r in data if isinstance(r, dict)]
+        if isinstance(data, dict):
+            for key in ("email_addresses", "items"):
+                val = data.get(key)
+                if isinstance(val, list):
+                    return [r for r in val if isinstance(r, dict)]
+        return []
+
+    def email_counts_by_domain(self) -> dict[str, int]:
+        """Active address counts keyed by domain_id string."""
+        counts: dict[str, int] = {}
+        for row in self.list_email_addresses():
             flat = _attrs(row)
-            rid = str(flat.get("id") or row.get("id") or "")
-            name = str(flat.get("name") or "").lower()
-            # Never reuse domains that leak tool/project names.
-            if "regbot" in name:
-                logger.info("Mailhook skipping branded domain id=%s name=%s", rid, name)
+            did = flat.get("domain_id")
+            if did is None or did == "":
+                # Fall back to domain host → match later if needed
                 continue
-            ready = flat.get("ready")
-            status = str(flat.get("verification_status") or flat.get("status") or "").lower()
-            if rid and (ready is True or status in {"verified", "ready", "active", ""}):
-                self.domain_id = rid
-                logger.info(
-                    "Mailhook using existing domain id=%s name=%s",
-                    rid,
-                    flat.get("name") or "",
-                )
-                _persist_domain_id(rid)
-                return rid
+            key = str(did)
+            counts[key] = counts.get(key, 0) + 1
+        return counts
 
-        # Neutral shared subdomain only — never tool/project names (fingerprinting).
+    @staticmethod
+    def _domain_ready(flat: dict[str, Any]) -> bool:
+        ready = flat.get("ready")
+        status = str(
+            flat.get("verification_status") or flat.get("status") or ""
+        ).lower()
+        if ready is True:
+            return True
+        if ready is False:
+            return False
+        return status in {"verified", "ready", "active", "provisioned", ""}
+
+    def create_shared_domain(self, *, prefer_slug: str = "") -> str:
+        """Create a shared *.tail.me domain with a random single-word slug."""
         last_error: Exception | None = None
-        for _ in range(8):
-            slug = self.tailme_slug or _random_tailme_slug()
-            # Only honor fixed slug on first try; then pick another word on collision.
-            self.tailme_slug = ""
+        fixed_slug = (prefer_slug or self.tailme_slug or "").strip()
+        for attempt in range(8):
+            if attempt == 0 and fixed_slug:
+                slug = fixed_slug
+            else:
+                slug = _random_tailme_slug()
             payload: dict[str, Any] = {"domain_type": "shared", "tailme_slug": slug}
             logger.info("Mailhook creating shared domain slug=%s", slug)
             try:
@@ -357,20 +381,93 @@ class MailhookProvider:
             )
             return rid
         raise EmailProviderError(
-            f"Mailhook create domain failed after retries: {last_error}"
+            f"Mailhook create domain failed after retries: {last_error}. "
+            "Plan may limit shared domains — upgrade or free capacity."
         ) from last_error
 
-    def list_email_addresses(self) -> list[dict[str, Any]]:
-        raw = self._request("GET", "/email_addresses")
-        data = _unwrap_data(raw)
-        if isinstance(data, list):
-            return [r for r in data if isinstance(r, dict)]
-        if isinstance(data, dict):
-            for key in ("email_addresses", "items"):
-                val = data.get(key)
-                if isinstance(val, list):
-                    return [r for r in val if isinstance(r, dict)]
-        return []
+    def pick_domain_for_inbox(self) -> str:
+        """Pick a domain with fewer than max emails, else create a new subdomain.
+
+        Cap (default 2) avoids reusing the same *.tail.me subdomain too heavily.
+        """
+        max_n = self.max_emails_per_domain
+        counts = self.email_counts_by_domain()
+        rows = self.list_domains()
+
+        candidates: list[tuple[int, str, str]] = []  # (count, id, name)
+        for row in rows:
+            flat = _attrs(row)
+            rid = str(flat.get("id") or row.get("id") or "")
+            name = str(flat.get("name") or flat.get("full_domain") or "").lower()
+            if not rid:
+                continue
+            if "regbot" in name:
+                logger.info("Mailhook skipping branded domain id=%s name=%s", rid, name)
+                continue
+            if not self._domain_ready(flat):
+                continue
+            count = counts.get(rid, counts.get(str(int(rid)) if rid.isdigit() else rid, 0))
+            # Domain attribute fallback when list is empty/partial
+            if count == 0 and rid not in counts:
+                attr_count = flat.get("email_addresses_count")
+                if attr_count is not None:
+                    try:
+                        count = int(attr_count)
+                    except (TypeError, ValueError):
+                        count = 0
+            if count < max_n:
+                candidates.append((count, rid, name))
+
+        preferred = (self.domain_id or "").strip()
+        if preferred:
+            for count, rid, name in candidates:
+                if rid == preferred or (
+                    preferred.isdigit() and rid == preferred
+                ):
+                    logger.info(
+                        "Mailhook reusing preferred domain id=%s name=%s count=%s/%s",
+                        rid,
+                        name,
+                        count,
+                        max_n,
+                    )
+                    self.domain_id = rid
+                    _persist_domain_id(rid)
+                    return rid
+            pref_count = counts.get(preferred, 0)
+            if pref_count >= max_n:
+                logger.info(
+                    "Mailhook preferred domain id=%s at cap (%s/%s) — rotating subdomain",
+                    preferred,
+                    pref_count,
+                    max_n,
+                )
+
+        if candidates:
+            # Fill domains that already have 1 address before opening empty ones,
+            # then lowest id for stability.
+            candidates.sort(key=lambda t: (-t[0], t[1]))
+            count, rid, name = candidates[0]
+            logger.info(
+                "Mailhook selected domain id=%s name=%s count=%s/%s",
+                rid,
+                name,
+                count,
+                max_n,
+            )
+            self.domain_id = rid
+            _persist_domain_id(rid)
+            return rid
+
+        logger.info(
+            "Mailhook all domains at cap (%s emails) — creating new subdomain",
+            max_n,
+        )
+        return self.create_shared_domain()
+
+    def ensure_domain(self) -> str:
+        """Return a domain under the per-subdomain email cap (create if needed)."""
+        return self.pick_domain_for_inbox()
 
     def delete_email_address(self, email_id: str) -> None:
         eid = (email_id or "").strip()
@@ -410,11 +507,13 @@ class MailhookProvider:
     def create_inbox(self, *, prefix: str | None = None) -> Inbox:
         """Create a disposable Mailhook address.
 
-        Prefer ``local_part`` from profile prefix (``john.smith``). On free-tier
-        capacity errors, free the oldest address once and retry.
+        Prefer ``local_part`` from profile prefix (``john.smith``). Rotates
+        ``*.tail.me`` subdomain after ``max_emails_per_domain`` (default 2)
+        addresses. On free-tier capacity errors, free the oldest address once
+        and retry.
         """
         if self._auto_ensure_domain:
-            domain_id = self.ensure_domain()
+            domain_id = self.pick_domain_for_inbox()
         else:
             domain_id = self.domain_id
             if not domain_id:

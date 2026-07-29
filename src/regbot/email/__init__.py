@@ -10,6 +10,7 @@ from .base import (
     get_email_provider,
     get_rotating_email_provider,
 )
+from .freecustom import FreeCustomProvider
 from .mailhook import MailhookProvider
 from .openinbox import OpenInboxProvider
 
@@ -18,6 +19,7 @@ __all__ = [
     "EmailProvider",
     "EmailProviderError",
     "FixedEmailProvider",
+    "FreeCustomProvider",
     "Inbox",
     "MailhookProvider",
     "OpenInboxProvider",

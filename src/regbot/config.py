@@ -15,6 +15,8 @@ _ENV_PREFIXES = (
     "OPENINBOX_",
     "ANYMESSAGE_",
     "MAILHOOK_",
+    "FREECUSTOM_",
+    "FCE_",
     "FORWARDEMAIL_",
     "REG_ALERT_",
 )
@@ -151,14 +153,14 @@ CAPSOLVER_API_KEY = os.environ.get("CAPSOLVER_API_KEY", "")
 
 # Email provider (OTP path is direct — not proxied).
 # openinbox | mailhook | anymessage | rotate | manual | fake | http
-# rotate = weighted pick (default openinbox:5,mailhook:1 → Mailhook ~1/6)
+# rotate = weighted pick (default openinbox + freecustom equal, mailhook lower)
 EMAIL_PROVIDER = os.environ.get("EMAIL_PROVIDER", "rotate").strip().lower()
 EMAIL_API_KEY = os.environ.get("EMAIL_API_KEY", "")
 EMAIL_API_BASE = os.environ.get("EMAIL_API_BASE", "").rstrip("/")
 EMAIL_DOMAIN = os.environ.get("EMAIL_DOMAIN", "")
-# Weighted rotation, e.g. openinbox:5,mailhook:1  (empty → default when rotate)
+# Weighted rotation — openinbox ≈ freecustom; mailhook smaller share
 EMAIL_PROVIDER_WEIGHTS = os.environ.get(
-    "EMAIL_PROVIDER_WEIGHTS", "openinbox:5,mailhook:1"
+    "EMAIL_PROVIDER_WEIGHTS", "openinbox:3,freecustom:5,mailhook:1"
 ).strip()
 
 # OpenInbox (https://openinbox.io/api-docs) — preferred automatic OTP source
@@ -221,6 +223,40 @@ MAILHOOK_AUTO_REGISTER = os.environ.get("MAILHOOK_AUTO_REGISTER", "true").lower(
 REGBOT_MAILHOOK_PRUNE_OLDEST = os.environ.get(
     "REGBOT_MAILHOOK_PRUNE_OLDEST", "true"
 ).lower() in {"1", "true", "yes"}
+# Max active addresses per shared *.tail.me subdomain before rotating slug
+MAILHOOK_MAX_EMAILS_PER_DOMAIN = int(
+    os.environ.get("MAILHOOK_MAX_EMAILS_PER_DOMAIN", "2")
+)
+
+# FreeCustom.Email (https://www.freecustom.email/api) — free tier needs dashboard key
+FREECUSTOM_API_KEY = (
+    os.environ.get("FREECUSTOM_API_KEY", "")
+    or os.environ.get("FCE_API_KEY", "")
+    or ""
+).strip()
+FREECUSTOM_BASE_URL = os.environ.get(
+    "FREECUSTOM_BASE_URL", "https://api2.freecustom.email"
+).rstrip("/")
+# Preferred free platform domain (ditapi.info / ditube.info / ditmail.info, …)
+FREECUSTOM_DOMAIN = os.environ.get("FREECUSTOM_DOMAIN", "ditapi.info").strip().lstrip("@")
+# SAS-blocked FreeCustom domains — never assign these (comma-separated).
+# Default when unset; set FREECUSTOM_BANNED_DOMAINS= to disable.
+_DEFAULT_FREECUSTOM_BANNED = "ditlearn.info,junkstopper.info"
+FREECUSTOM_BANNED_DOMAINS_RAW = os.environ.get(
+    "FREECUSTOM_BANNED_DOMAINS", _DEFAULT_FREECUSTOM_BANNED
+)
+
+
+def freecustom_banned_domains(raw: str | None = None) -> frozenset[str]:
+    """Parse comma-separated FreeCustom ban list (lowercased hostnames)."""
+    text = FREECUSTOM_BANNED_DOMAINS_RAW if raw is None else raw
+    if text is None:
+        return frozenset()
+    return frozenset(
+        part.strip().lower().lstrip("@")
+        for part in str(text).split(",")
+        if part.strip()
+    )
 
 
 def parse_email_provider_weights(
@@ -229,7 +265,7 @@ def parse_email_provider_weights(
     """Parse ``openinbox:5,mailhook:1`` into ``[(name, weight), ...]``.
 
     Empty / invalid entries are skipped. If nothing parses, returns the default
-    openinbox:5 + mailhook:1 rotation (Mailhook ~1/6).
+    openinbox:3 + freecustom:5 + mailhook:1 rotation.
     """
     text = (raw if raw is not None else EMAIL_PROVIDER_WEIGHTS or "").strip()
     out: list[tuple[str, float]] = []
@@ -251,7 +287,7 @@ def parse_email_provider_weights(
             if name and weight > 0:
                 out.append((name, weight))
     if not out:
-        out = [("openinbox", 5.0), ("mailhook", 1.0)]
+        out = [("openinbox", 3.0), ("freecustom", 5.0), ("mailhook", 1.0)]
     return out
 
 # Registration behaviour
